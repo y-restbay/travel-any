@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "dev": "concurrently \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "backend/.venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 6688 --reload",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "test:backend": "curl -s http://127.0.0.1:6688/api/health",
+    "build": "npm --prefix frontend run build"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

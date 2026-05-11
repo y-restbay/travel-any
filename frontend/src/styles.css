@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .input {
+    @apply w-full rounded-3xl bg-[#F8F6F1] px-4 py-3 text-[15px] text-ink outline-none shadow-quiet transition placeholder:text-muted/60 focus:bg-paper focus:shadow-focus;
+  }
+}
+
+:root {
+  color: #2f2a25;
+  background: #f8f9fa;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(232, 216, 199, 0.34), transparent 28rem),
+    linear-gradient(180deg, #f8f9fa 0%, #f4f1ec 100%);
+}
+
+button,
+textarea,
+input {
+  font: inherit;
+}
+
+.markdown-body {
+  line-height: 1.78;
+  text-wrap: pretty;
+}
+
+.markdown-body p {
+  margin: 0 0 0.9rem;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.7rem 0 0.9rem 1.25rem;
+}
+
+.markdown-body code {
+  border-radius: 0.65rem;
+  background: rgba(47, 42, 37, 0.06);
+  padding: 0.12rem 0.34rem;
+  font-size: 0.9em;
+}
+
+.soft-scrollbar::-webkit-scrollbar {
+  width: 10px;
+}
+
+.soft-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(128, 119, 110, 0.22);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
