@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -12,6 +13,19 @@ class TestLLMRequest(BaseModel):
 
 
 class TestLLMResponse(BaseModel):
+    success: bool
+    latency_ms: int = 0
+    message: str = ""
+
+
+class TestEmbeddingRequest(BaseModel):
+    provider: str = "hash"
+    model_name: str = "hash-384"
+    api_key: str = ""
+    base_url: str = ""
+
+
+class TestEmbeddingResponse(BaseModel):
     success: bool
     latency_ms: int = 0
     message: str = ""
@@ -86,9 +100,38 @@ class LLMConfigRead(LLMConfigBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class EmbeddingConfigBase(BaseModel):
+    provider: str = "hash"
+    model_name: str = "hash-384"
+    api_key: str = ""
+    base_url: str = ""
+    is_active: bool = True
+
+
+class EmbeddingConfigCreate(EmbeddingConfigBase):
+    pass
+
+
+class EmbeddingConfigUpdate(BaseModel):
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class EmbeddingConfigRead(EmbeddingConfigBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SystemPromptBase(BaseModel):
     name: str = "Default Travel Planner"
     content: str
+    knowledge_scope: list[str] = []
     is_active: bool = True
 
 
@@ -99,6 +142,7 @@ class SystemPromptCreate(SystemPromptBase):
 class SystemPromptUpdate(BaseModel):
     name: Optional[str] = None
     content: Optional[str] = None
+    knowledge_scope: Optional[list[str]] = None
     is_active: Optional[bool] = None
 
 
@@ -108,6 +152,19 @@ class SystemPromptRead(SystemPromptBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("knowledge_scope", mode="before")
+    @classmethod
+    def parse_knowledge_scope(cls, v: Any) -> Any:
+        if v in (None, ""):
+            return []
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                return []
+        return v
 
 
 class AdminConfigRead(BaseModel):

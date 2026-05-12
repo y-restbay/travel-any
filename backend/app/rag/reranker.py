@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.rag.embeddings import tokenize
 from app.rag.schemas import RetrievedContext
@@ -8,10 +8,18 @@ from app.rag.schemas import RetrievedContext
 class Reranker:
     """Local reranker placeholder; can be swapped for BGE or Cohere Rerank later."""
 
-    def rerank(self, query: str, contexts: List[RetrievedContext], top_k: int = 5, min_score: float = 0.26) -> List[RetrievedContext]:
+    def rerank(
+        self,
+        query: str,
+        contexts: List[RetrievedContext],
+        top_k: int = 5,
+        min_score: float = 0.26,
+        route_weights: Optional[Dict[str, float]] = None,
+    ) -> List[RetrievedContext]:
         query_terms = set(tokenize(query))
         merged: Dict[str, RetrievedContext] = {}
         source_bonus = defaultdict(float, {"vector": 0.04, "keyword": 0.06, "graph": 0.08})
+        route_weights = route_weights or {}
 
         for context in contexts:
             existing = merged.get(context.chunk_id)
@@ -25,7 +33,10 @@ class Reranker:
         for context in merged.values():
             doc_terms = set(tokenize(context.text))
             lexical = len(query_terms.intersection(doc_terms)) / max(1, len(query_terms))
-            context.score = round((context.score * 0.7) + (lexical * 0.25) + source_bonus[context.source.split("+")[0]], 4)
+            primary_source = context.source.split("+")[0]
+            route_weight = route_weights.get(primary_source, 1.0)
+            weighted_retrieval = context.score * (0.55 + 0.45 * route_weight)
+            context.score = round((weighted_retrieval * 0.7) + (lexical * 0.25) + source_bonus[primary_source], 4)
             if context.score >= min_score:
                 scored.append(context)
 

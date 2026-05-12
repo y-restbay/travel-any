@@ -1,10 +1,13 @@
 import json
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy.orm import Session
 
+from app.db.session import get_db
 from app.rag import get_rag_pipeline
-from app.rag.schemas import IngestResult, RetrieveRequest, RetrieveResult, TextIngestRequest
+from app.rag.schemas import IngestResult, RAGDebugResult, RetrieveRequest, RetrieveResult, TextIngestRequest
+from app.services.config_service import get_active_llm_config
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
@@ -12,6 +15,11 @@ router = APIRouter(prefix="/rag", tags=["rag"])
 @router.get("/stats")
 def rag_stats() -> Dict[str, Any]:
     return get_rag_pipeline().stats()
+
+
+@router.post("/rebuild-vector-index")
+def rebuild_vector_index() -> Dict[str, Any]:
+    return get_rag_pipeline().rebuild_vector_index()
 
 
 @router.post("/ingest/text", response_model=IngestResult)
@@ -52,5 +60,10 @@ async def ingest_upload(
 
 
 @router.post("/retrieve", response_model=RetrieveResult)
-def retrieve(payload: RetrieveRequest) -> RetrieveResult:
-    return get_rag_pipeline().retrieve_context(payload.query, top_k=payload.top_k)
+def retrieve(payload: RetrieveRequest, db: Session = Depends(get_db)) -> RetrieveResult:
+    return get_rag_pipeline().retrieve_context(payload.query, llm_config=get_active_llm_config(db), top_k=payload.top_k)
+
+
+@router.post("/debug", response_model=RAGDebugResult)
+def debug_retrieve(payload: RetrieveRequest, db: Session = Depends(get_db)) -> RAGDebugResult:
+    return get_rag_pipeline().debug_retrieve(payload.query, llm_config=get_active_llm_config(db), top_k=payload.top_k)

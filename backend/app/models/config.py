@@ -37,6 +37,21 @@ class LLMConfig(Base):
     )
 
 
+class EmbeddingConfig(Base):
+    __tablename__ = "embedding_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    provider: Mapped[str] = mapped_column(String(80), default="hash", index=True)
+    model_name: Mapped[str] = mapped_column(String(160), default="hash-384")
+    api_key: Mapped[str] = mapped_column(Text, default="")
+    base_url: Mapped[str] = mapped_column(String(500), default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SystemPrompt(Base):
     __tablename__ = "system_prompts"
 
@@ -49,6 +64,7 @@ class SystemPrompt(Base):
             "你会根据用户的偏好、预算、季节、同行人群和节奏，给出清晰、温暖、可执行的旅行建议。"
         ),
     )
+    knowledge_scope: Mapped[str] = mapped_column(Text, default="[]")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

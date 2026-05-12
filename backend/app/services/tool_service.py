@@ -102,4 +102,15 @@ TOOL_PRESETS: List[Dict[str, Any]] = [
         "tool_type": "firecrawl_scrape",
         "config": {"api_key": ""},
     },
+    {
+        "name": "get_weather",
+        "label": "Weather (QWeather)",
+        "description": (
+            "查询任意城市的实时天气或未来 3/7 天天气预报，可选生活指数与逐小时数据。"
+            "用户询问某地天气、是否下雨、穿衣建议、出行天气、紫外线、台风预警等情况时使用。"
+        ),
+        "tool_type": "qweather_weather",
+        # 留空表示从环境变量 QWEATHER_KEY 读取；填写则覆盖之
+        "config": {"api_key": "", "weather_host": "", "geo_host": ""},
+    },
 ]

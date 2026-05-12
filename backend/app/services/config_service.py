@@ -1,10 +1,18 @@
+import json
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.config import LLMConfig, SystemPrompt
-from app.schemas.config import AdminConfigUpdate, LLMConfigCreate, LLMConfigUpdate, SystemPromptCreate
+from app.models.config import EmbeddingConfig, LLMConfig, SystemPrompt
+from app.schemas.config import (
+    AdminConfigUpdate,
+    EmbeddingConfigCreate,
+    EmbeddingConfigUpdate,
+    LLMConfigCreate,
+    LLMConfigUpdate,
+    SystemPromptCreate,
+)
 
 
 DEFAULT_PROMPT = (
@@ -30,6 +38,17 @@ def ensure_defaults(db: Session) -> None:
             )
         )
 
+    if db.scalar(select(EmbeddingConfig).limit(1)) is None:
+        db.add(
+            EmbeddingConfig(
+                provider="hash",
+                model_name="hash-384",
+                api_key="",
+                base_url="",
+                is_active=True,
+            )
+        )
+
     if db.scalar(select(SystemPrompt).limit(1)) is None:
         db.add(
             SystemPrompt(
@@ -47,6 +66,14 @@ def get_active_llm_config(db: Session) -> LLMConfig:
     if config is None:
         ensure_defaults(db)
         config = db.scalar(select(LLMConfig).order_by(LLMConfig.id))
+    return config
+
+
+def get_active_embedding_config(db: Session) -> EmbeddingConfig:
+    config = db.scalar(select(EmbeddingConfig).where(EmbeddingConfig.is_active.is_(True)).order_by(EmbeddingConfig.id))
+    if config is None:
+        ensure_defaults(db)
+        config = db.scalar(select(EmbeddingConfig).order_by(EmbeddingConfig.id))
     return config
 
 
@@ -102,13 +129,59 @@ def delete_llm_config(db: Session, config_id: int) -> bool:
     return True
 
 
+def list_embedding_configs(db: Session) -> list[EmbeddingConfig]:
+    ensure_defaults(db)
+    return list(db.scalars(select(EmbeddingConfig).order_by(EmbeddingConfig.id)).all())
+
+
+def create_embedding_config(db: Session, payload: EmbeddingConfigCreate) -> EmbeddingConfig:
+    config = EmbeddingConfig(**payload.model_dump())
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    if config.is_active:
+        _deactivate_others(db, EmbeddingConfig, config.id)
+        db.commit()
+        db.refresh(config)
+    return config
+
+
+def update_embedding_config(db: Session, config_id: int, payload: EmbeddingConfigUpdate) -> Optional[EmbeddingConfig]:
+    config = db.get(EmbeddingConfig, config_id)
+    if config is None:
+        return None
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(config, key, value)
+
+    db.commit()
+    db.refresh(config)
+    if config.is_active:
+        _deactivate_others(db, EmbeddingConfig, config.id)
+        db.commit()
+        db.refresh(config)
+    return config
+
+
+def delete_embedding_config(db: Session, config_id: int) -> bool:
+    config = db.get(EmbeddingConfig, config_id)
+    if config is None:
+        return False
+    db.delete(config)
+    db.commit()
+    ensure_defaults(db)
+    return True
+
+
 def list_system_prompts(db: Session) -> list[SystemPrompt]:
     ensure_defaults(db)
     return list(db.scalars(select(SystemPrompt).order_by(SystemPrompt.id)).all())
 
 
 def create_system_prompt(db: Session, payload: SystemPromptCreate) -> SystemPrompt:
-    prompt = SystemPrompt(**payload.model_dump())
+    data = payload.model_dump()
+    data["knowledge_scope"] = json.dumps(data.get("knowledge_scope") or [], ensure_ascii=False)
+    prompt = SystemPrompt(**data)
     db.add(prompt)
     db.commit()
     db.refresh(prompt)
@@ -124,7 +197,10 @@ def update_system_prompt(db: Session, prompt_id: int, payload) -> Optional[Syste
     if prompt is None:
         return None
 
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "knowledge_scope" in data:
+        data["knowledge_scope"] = json.dumps(data.get("knowledge_scope") or [], ensure_ascii=False)
+    for key, value in data.items():
         setattr(prompt, key, value)
 
     db.commit()
@@ -136,6 +212,16 @@ def update_system_prompt(db: Session, prompt_id: int, payload) -> Optional[Syste
     return prompt
 
 
+def delete_system_prompt(db: Session, prompt_id: int) -> bool:
+    prompt = db.get(SystemPrompt, prompt_id)
+    if prompt is None:
+        return False
+    db.delete(prompt)
+    db.commit()
+    ensure_defaults(db)
+    return True
+
+
 def update_active_admin_config(db: Session, payload: AdminConfigUpdate) -> tuple[LLMConfig, SystemPrompt]:
     llm_config = get_active_llm_config(db)
     system_prompt = get_active_system_prompt(db)
@@ -144,7 +230,12 @@ def update_active_admin_config(db: Session, payload: AdminConfigUpdate) -> tuple
         setattr(llm_config, key, value)
     llm_config.is_active = True
 
-    for key, value in payload.system_prompt.model_dump(exclude_unset=True).items():
+    system_prompt_data = payload.system_prompt.model_dump(exclude_unset=True)
+    if "knowledge_scope" in system_prompt_data:
+        system_prompt_data["knowledge_scope"] = json.dumps(
+            system_prompt_data.get("knowledge_scope") or [], ensure_ascii=False
+        )
+    for key, value in system_prompt_data.items():
         setattr(system_prompt, key, value)
     system_prompt.is_active = True
 

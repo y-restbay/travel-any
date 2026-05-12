@@ -6,25 +6,30 @@ import chromadb
 from chromadb.config import Settings
 from rank_bm25 import BM25Okapi
 
-from app.rag.embeddings import HashEmbeddingFunction, tokenize
+from app.rag.embeddings import create_embedding_function, tokenize
 from app.rag.schemas import IndexedChunk, RetrievedContext
 
 
 class HybridStorage:
-    def __init__(self, chroma_path: str, bm25_path: str) -> None:
+    def __init__(self, chroma_path: str, bm25_path: str, settings, embedding_config=None) -> None:
         self.chroma_path = Path(chroma_path)
         self.bm25_path = Path(bm25_path)
         self.chroma_path.mkdir(parents=True, exist_ok=True)
         self.bm25_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.embedding_function = HashEmbeddingFunction()
+        self.embedding_function = create_embedding_function(settings, embedding_config)
+        self.embedding_profile = self.embedding_function.profile
         self.client = chromadb.PersistentClient(
             path=str(self.chroma_path),
             settings=Settings(anonymized_telemetry=False),
         )
         self.collection = self.client.get_or_create_collection(
-            name="wanderbot_knowledge",
-            metadata={"hnsw:space": "cosine"},
+            name=self.embedding_profile.collection_name,
+            metadata={
+                "hnsw:space": "cosine",
+                "embedding_provider": self.embedding_profile.provider,
+                "embedding_model": self.embedding_profile.model,
+            },
         )
         self.chunks: List[IndexedChunk] = []
         self.entity_index: Dict[str, List[str]] = {}
@@ -44,6 +49,16 @@ class HybridStorage:
         self._merge_chunks(chunks)
         self._persist_bm25()
         self._rebuild_bm25()
+
+    def rebuild_vector_index(self) -> int:
+        if not self.chunks:
+            return 0
+        ids = [chunk.id for chunk in self.chunks]
+        texts = [chunk.text for chunk in self.chunks]
+        embeddings = self.embedding_function.embed_documents(texts)
+        metadatas = [self._safe_metadata({**chunk.metadata, "entities": ", ".join(chunk.entities)}) for chunk in self.chunks]
+        self.collection.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
+        return len(self.chunks)
 
     def vector_search(self, query: str, top_k: int = 8) -> List[RetrievedContext]:
         if self.collection.count() == 0:
@@ -133,12 +148,33 @@ class HybridStorage:
         return contexts
 
     def stats(self) -> Dict[str, Any]:
+        documents: Dict[str, Dict[str, Any]] = {}
+        for chunk in self.chunks:
+            document_id = str(chunk.metadata.get("document_id") or "unknown")
+            summary = documents.setdefault(
+                document_id,
+                {
+                    "document_id": document_id,
+                    "filename": chunk.metadata.get("filename", "unknown"),
+                    "chunk_count": 0,
+                    "strategy": chunk.metadata.get("chunk_strategy"),
+                    "source": chunk.metadata.get("source"),
+                    "doc_type": chunk.metadata.get("doc_type"),
+                },
+            )
+            summary["chunk_count"] += 1
+
         return {
             "chunk_count": len(self.chunks),
             "vector_count": self.collection.count(),
             "entity_count": len(self.entity_index),
             "chroma_path": str(self.chroma_path),
+            "collection_name": self.embedding_profile.collection_name,
+            "embedding_provider": self.embedding_profile.provider,
+            "embedding_model": self.embedding_profile.model,
+            "is_real_embedding": self.embedding_profile.is_real_embedding,
             "bm25_path": str(self.bm25_path),
+            "documents": sorted(documents.values(), key=lambda item: str(item.get("filename", ""))),
         }
 
     def _merge_chunks(self, chunks: Iterable[IndexedChunk]) -> None:

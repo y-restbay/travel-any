@@ -5,12 +5,17 @@ from app.db.session import get_db
 from app.schemas.config import (
     AdminConfigRead,
     AdminConfigUpdate,
+    EmbeddingConfigCreate,
+    EmbeddingConfigRead,
+    EmbeddingConfigUpdate,
     LLMConfigCreate,
     LLMConfigRead,
     LLMConfigUpdate,
     SystemPromptCreate,
     SystemPromptRead,
     SystemPromptUpdate,
+    TestEmbeddingRequest,
+    TestEmbeddingResponse,
     TestLLMRequest,
     TestLLMResponse,
     ToolCreate,
@@ -51,6 +56,41 @@ async def test_config(payload: TestLLMRequest) -> TestLLMResponse:
     return TestLLMResponse(**result)
 
 
+@router.post("/config/embeddings/test", response_model=TestEmbeddingResponse)
+async def test_embedding_config(payload: TestEmbeddingRequest) -> TestEmbeddingResponse:
+    import time
+    from types import SimpleNamespace
+
+    from app.core.config import get_settings
+    from app.rag.embeddings import create_embedding_function
+
+    start = time.time()
+    try:
+        embedding = create_embedding_function(
+            get_settings(),
+            SimpleNamespace(
+                provider=payload.provider,
+                model_name=payload.model_name,
+                api_key=payload.api_key,
+                base_url=payload.base_url,
+            ),
+        )
+        vector = embedding.embed_query("WanderBot embedding connection test")
+        latency = int((time.time() - start) * 1000)
+        return TestEmbeddingResponse(
+            success=True,
+            latency_ms=latency,
+            message=f"连接成功（{latency}ms），向量维度：{len(vector)}",
+        )
+    except Exception as exc:
+        latency = int((time.time() - start) * 1000)
+        return TestEmbeddingResponse(
+            success=False,
+            latency_ms=latency,
+            message=f"连接失败（{latency}ms）：{exc}",
+        )
+
+
 @router.get("/config/llm", response_model=list[LLMConfigRead])
 def list_llm_configs(db: Session = Depends(get_db)) -> list[LLMConfigRead]:
     return config_service.list_llm_configs(db)
@@ -75,6 +115,44 @@ def delete_llm_config(config_id: int, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=404, detail="LLM config not found")
 
 
+@router.get("/config/embeddings", response_model=list[EmbeddingConfigRead])
+def list_embedding_configs(db: Session = Depends(get_db)) -> list[EmbeddingConfigRead]:
+    return config_service.list_embedding_configs(db)
+
+
+@router.post("/config/embeddings", response_model=EmbeddingConfigRead, status_code=status.HTTP_201_CREATED)
+def create_embedding_config(payload: EmbeddingConfigCreate, db: Session = Depends(get_db)) -> EmbeddingConfigRead:
+    from app.rag.pipeline import get_rag_pipeline
+
+    config = config_service.create_embedding_config(db, payload)
+    get_rag_pipeline.cache_clear()
+    return config
+
+
+@router.patch("/config/embeddings/{config_id}", response_model=EmbeddingConfigRead)
+def update_embedding_config(
+    config_id: int,
+    payload: EmbeddingConfigUpdate,
+    db: Session = Depends(get_db),
+) -> EmbeddingConfigRead:
+    from app.rag.pipeline import get_rag_pipeline
+
+    config = config_service.update_embedding_config(db, config_id, payload)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Embedding config not found")
+    get_rag_pipeline.cache_clear()
+    return config
+
+
+@router.delete("/config/embeddings/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_embedding_config(config_id: int, db: Session = Depends(get_db)) -> None:
+    from app.rag.pipeline import get_rag_pipeline
+
+    if not config_service.delete_embedding_config(db, config_id):
+        raise HTTPException(status_code=404, detail="Embedding config not found")
+    get_rag_pipeline.cache_clear()
+
+
 @router.get("/config/prompts", response_model=list[SystemPromptRead])
 def list_system_prompts(db: Session = Depends(get_db)) -> list[SystemPromptRead]:
     return config_service.list_system_prompts(db)
@@ -95,6 +173,12 @@ def update_system_prompt(
     if prompt is None:
         raise HTTPException(status_code=404, detail="System prompt not found")
     return prompt
+
+
+@router.delete("/config/prompts/{prompt_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_system_prompt(prompt_id: int, db: Session = Depends(get_db)) -> None:
+    if not config_service.delete_system_prompt(db, prompt_id):
+        raise HTTPException(status_code=404, detail="System prompt not found")
 
 
 # ---- Tools ----

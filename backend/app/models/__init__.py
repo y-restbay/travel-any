@@ -1,3 +1,3 @@
-from app.models.config import LLMConfig, SystemPrompt, Tool
+from app.models.config import EmbeddingConfig, LLMConfig, SystemPrompt, Tool
 
-__all__ = ["LLMConfig", "SystemPrompt", "Tool"]
+__all__ = ["EmbeddingConfig", "LLMConfig", "SystemPrompt", "Tool"]
