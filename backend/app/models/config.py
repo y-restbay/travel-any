@@ -30,6 +30,9 @@ class LLMConfig(Base):
     model_name: Mapped[str] = mapped_column(String(120), default="wanderbot-mock")
     api_key: Mapped[str] = mapped_column(Text, default="")
     base_url: Mapped[str] = mapped_column(String(500), default="")
+    # 'tools' = 现有的 LangChain bind_tools 单 agent 工具调用循环
+    # 'supervisor' = LangGraph 多智能体 supervisor 模式
+    runtime: Mapped[str] = mapped_column(String(20), default="tools")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

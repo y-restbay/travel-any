@@ -116,6 +116,12 @@ def create_embedding_function(settings: Settings, db_config: Optional[EmbeddingC
         }
         if base_url:
             kwargs["base_url"] = base_url
+        if provider != "openai":
+            # 非官方 OpenAI 端点（dashscope/siliconflow/deepseek 等）不接受 tiktoken 切出来的 token id 数组，
+            # 关掉客户端预切片让 SDK 直接把原始字符串发出去。
+            kwargs["check_embedding_ctx_length"] = False
+            # 这些供应商的批量上限远小于 OpenAI（DashScope 单次最多 10 条），langchain 默认 chunk_size=1000 会触发 400。
+            kwargs["chunk_size"] = 10
         profile = EmbeddingProfile(
             provider=provider,
             model=model,

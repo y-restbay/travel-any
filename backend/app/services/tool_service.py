@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.config import Tool
+from app.schemas.config import is_masked_secret
+from app.travel_tools.realtime_search_tool import REALTIME_SEARCH_DESCRIPTION
 
 
 def list_tools(db: Session) -> list[Tool]:
@@ -69,7 +71,15 @@ def update_tool(
     if tool_type is not None:
         tool.tool_type = tool_type
     if config is not None:
-        tool.config = json.dumps(config, ensure_ascii=False)
+        try:
+            existing_config = json.loads(tool.config or "{}")
+        except json.JSONDecodeError:
+            existing_config = {}
+        next_config = dict(config)
+        for key, value in list(next_config.items()):
+            if is_masked_secret(value):
+                next_config[key] = existing_config.get(key, "")
+        tool.config = json.dumps(next_config, ensure_ascii=False)
     if is_active is not None:
         tool.is_active = is_active
 
@@ -112,5 +122,46 @@ TOOL_PRESETS: List[Dict[str, Any]] = [
         "tool_type": "qweather_weather",
         # 留空表示从环境变量 QWEATHER_KEY 读取；填写则覆盖之
         "config": {"api_key": "", "weather_host": "", "geo_host": ""},
+    },
+    {
+        "name": "search_realtime_travel_info",
+        "label": "Realtime Travel Search (Tavily)",
+        "description": REALTIME_SEARCH_DESCRIPTION,
+        "tool_type": "tavily_realtime_search",
+        # 留空表示从环境变量 TAVILY_API_KEY 读取；填写则覆盖之
+        "config": {"api_key": ""},
+    },
+    {
+        "name": "get_directions",
+        "label": "Directions (Amap)",
+        "description": (
+            "规划多个地点之间的驾车 / 步行路线，并把路线推送到用户右侧的地图区域。"
+            "用户问 'A 到 B 怎么走'、推荐多个景点后串成行程、多日动线规划时使用。"
+            "未配置 AMAP_KEY 时使用 mock 数据，仍可在地图上看到示意路径。"
+        ),
+        "tool_type": "amap_directions",
+        # 留空表示从环境变量 AMAP_KEY 读取；填写则覆盖之
+        "config": {"api_key": "", "host": ""},
+    },
+    {
+        "name": "generate_itinerary_summary",
+        "label": "Itinerary Summary",
+        "description": (
+            "把多轮工具调用收集到的天气、景点、路线整合成结构化行程，"
+            "推送给前端渲染 '行程卡片'，并在缓存中保留供导出使用。"
+            "完成天气 + 各日动线规划后主动调用一次。"
+        ),
+        "tool_type": "itinerary_summary",
+        "config": {},
+    },
+    {
+        "name": "export_itinerary",
+        "label": "Itinerary Export",
+        "description": (
+            "把已生成的行程导出为 PDF 或 Word 文件，并通过 SSE 推送下载链接。"
+            "用户表示要下载、保存、导出时调用；默认 PDF。"
+        ),
+        "tool_type": "itinerary_export",
+        "config": {},
     },
 ]

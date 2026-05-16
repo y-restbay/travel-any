@@ -38,3 +38,10 @@ def run_lightweight_migrations(engine: Engine) -> None:
                 connection.execute(
                     text("ALTER TABLE system_prompts ADD COLUMN knowledge_scope TEXT NOT NULL DEFAULT '[]'")
                 )
+
+            llm_columns = connection.execute(text("PRAGMA table_info(llm_configs)")).mappings().all()
+            llm_names = {str(column["name"]) for column in llm_columns}
+            if llm_columns and "runtime" not in llm_names:
+                connection.execute(
+                    text("ALTER TABLE llm_configs ADD COLUMN runtime VARCHAR(20) NOT NULL DEFAULT 'tools'")
+                )

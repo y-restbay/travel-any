@@ -265,7 +265,7 @@ export default function EmbeddingConfigModule() {
               </div>
             )}
 
-            <div className="mt-6 flex flex-col gap-3 border-t border-line/50 pt-5 sm:flex-row sm:justify-end">
+            <div className="sticky bottom-0 -mx-6 mt-6 flex flex-col gap-3 border-t border-line/50 bg-paper/95 px-6 pt-5 pb-1 backdrop-blur md:-mx-7 md:px-7 sm:flex-row sm:justify-end">
               <SoftButton onClick={handleTestConnection} disabled={testStatus === 'testing'}>
                 {testStatus === 'testing' ? <Loader2 className="animate-spin" size={16} /> : <Wifi size={16} />}
                 测试连接

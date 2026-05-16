@@ -1,0 +1,102 @@
+# Sanitized production configuration example.
+# Copy to application-prod.yml on the production host and replace placeholders.
+
+app:
+  name: Travel Any
+  environment: production
+  public_url: https://your-domain.example
+  admin_path: /admin
+
+backend:
+  host: 0.0.0.0
+  port: 6688
+  api_prefix: /api
+  cors_origins:
+    - https://your-domain.example
+  database_url: sqlite:////data/wanderbot.db
+  storage:
+    rag_chroma_path: /data/storage/chroma
+    rag_bm25_path: /data/storage/bm25_index.json
+    export_dir: /data/exports
+  logging:
+    level: INFO
+    access_log: true
+
+frontend:
+  vite_api_base_url: https://your-domain.example/api
+  vite_grafana_dashboard_url: https://your-domain.example/grafana/d/travel-any-overview/travel-any-observability?orgId=1&refresh=10s&theme=light&kiosk=tv
+  vite_prometheus_url: https://your-domain.example/prometheus
+  admin:
+    username: ${ADMIN_USERNAME}
+    password: ${ADMIN_PASSWORD}
+
+llm:
+  provider: deepseek
+  model_name: deepseek-chat
+  runtime: supervisor
+  api_key: ${LLM_API_KEY}
+  base_url: https://api.deepseek.com
+
+rag:
+  embedding_provider: hash
+  embedding_model: ""
+  embedding_api_key: ${RAG_EMBEDDING_API_KEY}
+  embedding_base_url: ""
+  embedding_timeout: 20
+
+tools:
+  qweather:
+    api_key: ${QWEATHER_KEY}
+    host: ""
+    geo_host: ""
+  tavily:
+    api_key: ${TAVILY_API_KEY}
+  amap:
+    api_key: ${AMAP_KEY}
+    host: ""
+
+bailian:
+  retrieve_api:
+    access_key_id: ${BAILIAN_ACCESS_KEY_ID}
+    access_key_secret: ${BAILIAN_ACCESS_KEY_SECRET}
+    workspace_id: ${BAILIAN_WORKSPACE_ID}
+    index_id: ${BAILIAN_INDEX_ID}
+    endpoint: bailian.cn-beijing.aliyuncs.com
+    timeout: 15
+  app_channel:
+    dashscope_api_key: ${DASHSCOPE_API_KEY}
+    dashscope_workspace_id: ${DASHSCOPE_WORKSPACE_ID}
+    app_id: ${APP_ID}
+    base_url: https://dashscope.aliyuncs.com/api/v1
+    timeout: 60
+
+observability:
+  metrics_path: /metrics
+  prometheus:
+    image: prom/prometheus:v3.3.0
+    port: 9090
+    scrape_interval: 10s
+    retention: 15d
+    public_access: false
+  grafana:
+    image: grafana/grafana:11.0.0
+    port: 3000
+    allow_embedding: true
+    anonymous_enabled: false
+    admin_user: ${GRAFANA_ADMIN_USER}
+    admin_password: ${GRAFANA_ADMIN_PASSWORD}
+
+security:
+  https: true
+  expose_metrics_publicly: false
+  expose_grafana_publicly: false
+  admin_ip_allowlist:
+    - 127.0.0.1/32
+  secret_rotation_required_before_open_source: true
+
+docker:
+  compose_file: docker-compose.yml
+  volumes:
+    api_data: api-data
+    prometheus_data: prometheus-data
+    grafana_data: grafana-data

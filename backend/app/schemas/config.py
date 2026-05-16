@@ -31,6 +31,48 @@ class TestEmbeddingResponse(BaseModel):
     message: str = ""
 
 
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AdminLoginResponse(BaseModel):
+    token: str
+    username: str
+
+
+def mask_secret(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    if value.startswith("***"):
+        return value
+    if len(value) <= 8:
+        return "***"
+    return f"***{value[-4:]}"
+
+
+def is_masked_secret(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("***")
+
+
+def mask_secret_config(config: Any) -> Any:
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(config, dict):
+        return config
+    masked: dict[str, Any] = {}
+    for key, value in config.items():
+        lowered = str(key).lower()
+        if any(token in lowered for token in ("api_key", "secret", "token", "password")):
+            masked[key] = mask_secret(value)
+        else:
+            masked[key] = value
+    return masked
+
+
 class ToolBase(BaseModel):
     name: str
     label: str = ""
@@ -63,13 +105,7 @@ class ToolRead(ToolBase):
     @field_validator("config", mode="before")
     @classmethod
     def parse_config(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            import json
-            try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                return {}
-        return v
+        return mask_secret_config(v)
 
 
 class LLMConfigBase(BaseModel):
@@ -77,6 +113,7 @@ class LLMConfigBase(BaseModel):
     model_name: str = "wanderbot-mock"
     api_key: str = ""
     base_url: str = ""
+    runtime: str = "tools"  # 'tools' | 'supervisor'
     is_active: bool = True
 
 
@@ -89,6 +126,7 @@ class LLMConfigUpdate(BaseModel):
     model_name: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    runtime: Optional[str] = None
     is_active: Optional[bool] = None
 
 
@@ -98,6 +136,11 @@ class LLMConfigRead(LLMConfigBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def mask_api_key(cls, v: Any) -> Any:
+        return mask_secret(v)
 
 
 class EmbeddingConfigBase(BaseModel):
@@ -126,6 +169,11 @@ class EmbeddingConfigRead(EmbeddingConfigBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def mask_api_key(cls, v: Any) -> Any:
+        return mask_secret(v)
 
 
 class SystemPromptBase(BaseModel):
@@ -175,3 +223,11 @@ class AdminConfigRead(BaseModel):
 class AdminConfigUpdate(BaseModel):
     llm_config: LLMConfigUpdate
     system_prompt: SystemPromptUpdate
+
+
+class SystemLogEntry(BaseModel):
+    id: int
+    ts: float
+    level: str
+    logger: str
+    message: str

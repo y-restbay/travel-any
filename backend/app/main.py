@@ -8,12 +8,13 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # override=False 保证已经手动 export 的变量优先。
 load_dotenv(override=False)
 
-from app.api import admin, chat, health, rag
+from app.api import admin, chat, exports, health, rag
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.migrations import run_lightweight_migrations
 from app.db.session import SessionLocal, engine
-from app.models import config as config_models
+from app.models import booking as booking_models  # noqa: F401  注册业务表
+from app.models import config as config_models  # noqa: F401
 from app.services.config_service import ensure_defaults
 
 
@@ -35,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router, prefix=settings.api_prefix)
     app.include_router(rag.router, prefix=settings.api_prefix)
     app.include_router(chat.router, prefix=settings.api_prefix)
+    app.include_router(exports.router, prefix=settings.api_prefix)
 
     Instrumentator(
         excluded_handlers=["/metrics"],
@@ -43,6 +45,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def on_startup() -> None:
+        from app.services.log_buffer import install_log_buffer
+
+        install_log_buffer()
         Base.metadata.create_all(bind=engine)
         run_lightweight_migrations(engine)
         with SessionLocal() as db:

@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -8,6 +9,8 @@ from rank_bm25 import BM25Okapi
 
 from app.rag.embeddings import create_embedding_function, tokenize
 from app.rag.schemas import IndexedChunk, RetrievedContext
+
+logger = logging.getLogger(__name__)
 
 
 class HybridStorage:
@@ -64,11 +67,15 @@ class HybridStorage:
         if self.collection.count() == 0:
             return []
 
-        result = self.collection.query(
-            query_embeddings=[self.embedding_function.embed_query(query)],
-            n_results=min(top_k, self.collection.count()),
-            include=["documents", "metadatas", "distances"],
-        )
+        try:
+            result = self.collection.query(
+                query_embeddings=[self.embedding_function.embed_query(query)],
+                n_results=min(top_k, self.collection.count()),
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as exc:
+            logger.warning("Vector search skipped because embedding/query failed: %s", exc)
+            return []
         contexts: List[RetrievedContext] = []
         ids = result.get("ids", [[]])[0]
         documents = result.get("documents", [[]])[0]

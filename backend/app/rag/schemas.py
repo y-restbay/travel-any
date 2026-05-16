@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 
 
 ChunkStrategy = Literal["long_form", "short_form"]
-QueryRoute = Literal["vector", "keyword", "graph"]
-RouteDecisionSource = Literal["llm", "rules", "rules_fallback"]
+QueryRoute = Literal["vector", "keyword", "graph", "cloud"]
+RouteDecisionSource = Literal["llm", "rules", "rules_fallback", "cloud"]
 
 
 class IndexedChunk(BaseModel):

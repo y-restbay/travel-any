@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, X } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 export function Modal({
   open,
@@ -15,7 +16,7 @@ export function Modal({
   subtitle?: string
   children: ReactNode
 }) {
-  return (
+  const modal = (
     <AnimatePresence>
       {open && (
         <motion.div
@@ -24,8 +25,9 @@ export function Modal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto bg-black/30 px-4 backdrop-blur-lg"
+          className="fixed inset-0 z-[240] flex items-center justify-center overflow-hidden bg-black/35 px-4 py-5 backdrop-blur-lg"
           onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+          role="presentation"
         >
           <motion.div
             key="modal-panel"
@@ -33,24 +35,32 @@ export function Modal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 24 }}
             transition={{ type: 'spring', duration: 0.35, bounce: 0.12 }}
-            className="relative mt-[8vh] w-full max-w-2xl rounded-4xl bg-paper p-6 shadow-soft md:p-7"
+            className="relative flex max-h-[calc(100vh-2.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-4xl bg-paper shadow-soft"
             onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="admin-modal-title"
           >
-            <button
-              type="button"
-              onClick={onClose}
-              className="absolute right-5 top-5 grid h-8 w-8 place-items-center rounded-xl text-muted transition hover:bg-clay/30 hover:text-ink"
-            >
-              <X size={17} />
-            </button>
-            <h3 className="pr-8 text-xl font-semibold text-ink">{title}</h3>
-            {subtitle && <p className="mt-1.5 text-sm leading-6 text-muted">{subtitle}</p>}
-            <div className="mt-6">{children}</div>
+            <div className="shrink-0 border-b border-line/50 px-6 py-5 md:px-7">
+              <button
+                type="button"
+                onClick={onClose}
+                className="absolute right-5 top-5 grid h-8 w-8 place-items-center rounded-xl text-muted transition hover:bg-clay/30 hover:text-ink"
+                aria-label="关闭弹窗"
+              >
+                <X size={17} />
+              </button>
+              <h3 id="admin-modal-title" className="pr-8 text-xl font-semibold text-ink">{title}</h3>
+              {subtitle && <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted">{subtitle}</p>}
+            </div>
+            <div className="soft-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-5 md:px-7">{children}</div>
           </motion.div>
         </motion.div>
       )}
     </AnimatePresence>
   )
+
+  return createPortal(modal, document.body)
 }
 
 export function ModuleCard({

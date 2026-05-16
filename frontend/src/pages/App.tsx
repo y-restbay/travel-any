@@ -1,26 +1,52 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
+import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  ArrowLeftRight,
   ArrowUp,
   BrainCircuit,
   ChevronDown,
+  Cloud,
   Compass,
   Database,
+  Download,
   FileText,
+  Globe,
+  GripVertical,
+  History,
   Loader2,
-  PanelLeft,
-  PanelLeftClose,
+  Mic,
+  MicOff,
+  PanelRightClose,
   Route,
   Search,
   Sparkles,
+  X,
   User,
   Wrench,
 } from 'lucide-react'
-import ShellNav from '../components/ShellNav'
-import { streamChat } from '../api'
-import type { ChatMessage, ThinkingTrace, ThinkingTraceStep } from '../types'
+import MapPanel, { type MapPanelHandle } from '../components/MapPanel'
+import ItineraryCard from '../components/ItineraryCard'
+import HistoryPanel from '../components/HistoryPanel'
+import SourcesPanel from '../components/SourcesPanel'
+import {
+  type ConversationMeta,
+  createConversation,
+  deleteConversation,
+  getActiveId,
+  listConversations,
+  loadConversation,
+  saveConversation,
+  setActiveId,
+} from '../lib/conversationStore'
+import { API_BASE, getAdminConfig, resumeChat, streamChat } from '../api'
+import type { AgentRuntime, ChatMessage, ExportInfo, Itinerary, MapPayload, PendingInterrupt, ThinkingStep, ThinkingTrace, ThinkingTraceStep, WebSourceBundle } from '../types'
+
+const DEFAULT_MAP_WIDTH = 420
+const MIN_MAP_WIDTH = 340
+const MAX_MAP_WIDTH = 720
 
 const intro: ChatMessage = {
   id: 'intro',
@@ -31,15 +57,172 @@ const intro: ChatMessage = {
 
 const suggestions = ['带父母去京都 5 天，节奏慢一点', '第一次去冰岛，预算中等，想看自然风景', '上海出发，周末两天想找一个安静海边']
 
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike
+type SpeechRecognitionLike = {
+  lang: string
+  continuous: boolean
+  interimResults: boolean
+  onstart: (() => void) | null
+  onend: (() => void) | null
+  onerror: ((event: { error?: string }) => void) | null
+  onresult: ((event: SpeechRecognitionResultEventLike) => void) | null
+  start: () => void
+  stop: () => void
+}
+type SpeechRecognitionResultEventLike = {
+  resultIndex: number
+  results: ArrayLike<{
+    isFinal: boolean
+    0: { transcript: string }
+  }>
+}
+
+function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+  if (typeof window === 'undefined') return null
+  const speechWindow = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionCtor
+    webkitSpeechRecognition?: SpeechRecognitionCtor
+  }
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([intro])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [showThinkingDetails, setShowThinkingDetails] = useState(false)
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
+  const [mapVisible, setMapVisible] = useState(false)
+  const [mapWidth, setMapWidth] = useState(DEFAULT_MAP_WIDTH)
+  const [latestMapPayloads, setLatestMapPayloads] = useState<MapPayload[]>([])
+  const showThinkingDetails = false
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const autoScrollRef = useRef(true)
+  const isComposingRef = useRef(false)
+  const mapPanelRef = useRef<MapPanelHandle | null>(null)
+  const conversationIdRef = useRef<string | null>(
+    typeof window !== 'undefined' ? getActiveId() : null,
+  )
+  const [conversations, setConversations] = useState<ConversationMeta[]>([])
+  const [activeConvId, setActiveConvId] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [runtime, setRuntime] = useState<AgentRuntime>('tools')
+  const [deepThinking, setDeepThinking] = useState(false)
+  const [knowledgeSource, setKnowledgeSource] = useState<'local' | 'cloud'>('local')
+  const [webSearch, setWebSearch] = useState(false)
+  const [isVoiceListening, setIsVoiceListening] = useState(false)
+  const [voiceSupported, setVoiceSupported] = useState(true)
+  const resizeRef = useRef({ startX: 0, startWidth: DEFAULT_MAP_WIDTH })
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null)
+  const voiceBaseInputRef = useRef('')
+
+  // 始终指向最新 messages,供 debounce / beforeunload / 切换前 flush 读取。
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+
+  function persistNow() {
+    if (conversationIdRef.current) {
+      saveConversation(conversationIdRef.current, messagesRef.current)
+      setConversations(listConversations())
+    }
+  }
+
+  function resetTo(next: ChatMessage[], id: string) {
+    conversationIdRef.current = id
+    setActiveConvId(id)
+    setActiveId(id)
+    setMessages(next)
+    setInput('')
+    mapPanelRef.current?.clear()
+    setLatestMapPayloads([])
+    setMapVisible(false)
+  }
+
+  function openConversation(id: string) {
+    const stored = loadConversation(id)
+    resetTo([intro, ...((stored ?? []) as ChatMessage[])], id)
+  }
+
+  function startFresh() {
+    resetTo([intro], createConversation())
+  }
+
+  function handleSelectConversation(id: string) {
+    persistNow()
+    openConversation(id)
+    setHistoryOpen(false)
+  }
+
+  function handleNewConversation() {
+    persistNow()
+    startFresh()
+    setHistoryOpen(false)
+  }
+
+  function handleDeleteConversation(id: string) {
+    const deletingActive = id === conversationIdRef.current
+    if (!deletingActive) persistNow() // 保存当前会话,别碰被删的那条
+    deleteConversation(id)
+    const list = listConversations()
+    setConversations(list)
+    if (deletingActive) {
+      if (list.length) openConversation(list[0].id)
+      else startFresh()
+    }
+  }
+
+  useEffect(() => {
+    getAdminConfig()
+      .then((cfg) => {
+        setRuntime((cfg.llm_config.runtime as AgentRuntime) ?? 'tools')
+      })
+      .catch(() => {
+        /* 后端没起来时静默 */
+      })
+  }, [])
+
+  useEffect(() => {
+    setVoiceSupported(Boolean(getSpeechRecognitionCtor()))
+    return () => {
+      speechRecognitionRef.current?.stop()
+      speechRecognitionRef.current = null
+    }
+  }, [])
+
+  // 挂载时恢复上次打开的会话(有内容才恢复,否则保持全新欢迎页)。
+  useEffect(() => {
+    setConversations(listConversations())
+    const id = getActiveId()
+    if (!id) return
+    const stored = loadConversation(id)
+    if (stored && stored.length) {
+      conversationIdRef.current = id
+      setActiveConvId(id)
+      setMessages([intro, ...(stored as ChatMessage[])])
+    }
+  }, [])
+
+  // messages 变化后防抖落盘(流式 delta 很密集,400ms 合并写一次)。
+  useEffect(() => {
+    const id = conversationIdRef.current
+    if (!id) return
+    const timer = window.setTimeout(() => {
+      saveConversation(id, messagesRef.current)
+      setConversations(listConversations())
+    }, 400)
+    return () => window.clearTimeout(timer)
+  }, [messages, activeConvId])
+
+  // 关闭/刷新标签页时兜底保存,防止流式进行中关页丢最后一段。
+  useEffect(() => {
+    const handler = () => {
+      if (conversationIdRef.current) {
+        saveConversation(conversationIdRef.current, messagesRef.current)
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [])
 
   useEffect(() => {
     if (!scrollRef.current || !autoScrollRef.current) return
@@ -59,25 +242,103 @@ export default function App() {
   }, [input])
 
   useEffect(() => {
-    if (sidebarOpen) {
-      document.body.style.setProperty('--sidebar-width', '300px')
-    } else {
-      document.body.style.setProperty('--sidebar-width', '0px')
+    if (mapVisible && latestMapPayloads.length > 0) {
+      mapPanelRef.current?.renderRoute(latestMapPayloads[0])
     }
-  }, [sidebarOpen])
+  }, [mapVisible, latestMapPayloads])
+
+  function revealMap(payloads: MapPayload[] | MapPayload) {
+    const routes = Array.isArray(payloads) ? payloads : [payloads]
+    setLatestMapPayloads(routes)
+    setMapVisible(true)
+  }
+
+  function closeMap() {
+    setMapVisible(false)
+  }
+
+  function handleMapResizeStart(event: React.PointerEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    resizeRef.current = { startX: event.clientX, startWidth: mapWidth }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function handleMapResizeMove(event: React.PointerEvent<HTMLButtonElement>) {
+    if (!(event.buttons & 1)) return
+    const delta = resizeRef.current.startX - event.clientX
+    const nextWidth = Math.min(MAX_MAP_WIDTH, Math.max(MIN_MAP_WIDTH, resizeRef.current.startWidth + delta))
+    setMapWidth(nextWidth)
+  }
+
+  function handleInterruptDecision(messageId: string, decision: boolean) {
+    let threadId: string | null = null
+    setMessages((current) =>
+      current.map((m) => {
+        if (m.id !== messageId || !m.pendingInterrupt) return m
+        threadId = m.pendingInterrupt.thread_id
+        return {
+          ...m,
+          pendingInterrupt: { ...m.pendingInterrupt, status: decision ? 'approved' : 'rejected' },
+        }
+      }),
+    )
+    if (!threadId) return
+    setIsStreaming(true)
+    setStreamingMessageId(messageId)
+    resumeChat(
+      threadId,
+      decision,
+      buildStreamCallbacks(messageId, setMessages, conversationIdRef),
+    )
+      .catch(() => {
+        setMessages((current) =>
+          current.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  content:
+                    m.content +
+                    '\n\n_(continue 失败:请确认后端的 supervisor 路径在线。)_',
+                }
+              : m,
+          ),
+        )
+      })
+      .finally(() => {
+        setIsStreaming(false)
+        setStreamingMessageId(null)
+      })
+  }
 
   async function submit(value = input) {
     const content = value.trim()
     if (!content || isStreaming) return
 
+    // 首条用户消息时才落地会话 id(避免空会话刷屏);后续沿用同一 id。
+    if (!conversationIdRef.current) {
+      const id = createConversation()
+      conversationIdRef.current = id
+      setActiveConvId(id)
+    }
+
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', content }
     const assistantId = crypto.randomUUID()
-    const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', thinkingTrace: createPendingTrace() }
-    const nextMessages = [...messages, userMessage, assistantMessage]
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      thinkingTrace: createPendingTrace(knowledgeSource),
+    }
+    if (deepThinking && knowledgeSource !== 'cloud') {
+      assistantMessage.thinkingSteps = []
+    }
+    const baseMessages = dropTrailingDuplicateUserMessage(messages, content)
+    const nextMessages = [...baseMessages, userMessage, assistantMessage]
 
     setMessages(nextMessages)
     setInput('')
     setIsStreaming(true)
+    setStreamingMessageId(assistantId)
 
     try {
       await streamChat(
@@ -85,22 +346,15 @@ export default function App() {
           .filter((message) => message.id !== 'intro')
           .filter((message) => message.content.trim().length > 0)
           .map(({ role, content }) => ({ role, content })),
-        (delta) => {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId ? { ...message, content: message.content + delta } : message,
-            ),
-          )
-        },
-        (meta) => {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId
-                ? { ...message, thinkingTrace: updateThinkingTrace(message.thinkingTrace, meta) }
-                : message,
-            ),
-          )
-        },
+        buildStreamCallbacks(assistantId, setMessages, conversationIdRef),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        conversationIdRef.current ?? undefined,
+        deepThinking ? 'deep_thinking' : undefined,
+        knowledgeSource,
+        webSearch,
       )
     } catch (error) {
       setMessages((current) =>
@@ -116,6 +370,7 @@ export default function App() {
       )
     } finally {
       setIsStreaming(false)
+      setStreamingMessageId(null)
     }
   }
 
@@ -124,58 +379,92 @@ export default function App() {
     void submit()
   }
 
+  function toggleVoiceInput() {
+    if (isStreaming) return
+    const Recognition = getSpeechRecognitionCtor()
+    if (!Recognition) {
+      setVoiceSupported(false)
+      return
+    }
+
+    if (isVoiceListening) {
+      speechRecognitionRef.current?.stop()
+      return
+    }
+
+    const recognition = new Recognition()
+    recognition.lang = 'zh-CN'
+    recognition.continuous = true
+    recognition.interimResults = true
+    voiceBaseInputRef.current = input.trim()
+    let finalTranscript = ''
+
+    recognition.onstart = () => setIsVoiceListening(true)
+    recognition.onend = () => {
+      setIsVoiceListening(false)
+      speechRecognitionRef.current = null
+      textareaRef.current?.focus()
+    }
+    recognition.onerror = () => {
+      setIsVoiceListening(false)
+      speechRecognitionRef.current = null
+      textareaRef.current?.focus()
+    }
+    recognition.onresult = (event) => {
+      let interimTranscript = ''
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i]
+        const transcript = result[0]?.transcript ?? ''
+        if (result.isFinal) finalTranscript += transcript
+        else interimTranscript += transcript
+      }
+      const spoken = `${finalTranscript}${interimTranscript}`.trim()
+      const base = voiceBaseInputRef.current
+      setInput([base, spoken].filter(Boolean).join(base && spoken ? ' ' : ''))
+    }
+
+    speechRecognitionRef.current = recognition
+    recognition.start()
+  }
+
   return (
     <main className="flex h-screen flex-col text-ink">
-      <ShellNav />
-      <div className="flex flex-1 overflow-hidden pt-20">
-        {/* ===== Left Sidebar ===== */}
-        <aside
-          className={`relative flex-shrink-0 overflow-hidden border-r border-line/50 bg-paper/30 backdrop-blur-sm transition-all duration-300 ${
-            sidebarOpen ? 'w-[300px]' : 'w-0 md:w-12'
-          }`}
-        >
-          <div className={`flex h-full flex-col ${sidebarOpen ? 'opacity-100' : 'opacity-0 md:opacity-100'} transition-opacity duration-200`}>
-            {/* Sidebar header */}
-            <div className="flex items-center justify-between px-4 py-3">
-              {sidebarOpen && (
-                <span className="text-sm font-medium text-muted">辅助面板</span>
-              )}
-              <button
-                type="button"
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="grid h-8 w-8 place-items-center rounded-xl text-muted hover:bg-clay/30 hover:text-ink"
-                title={sidebarOpen ? '收起侧栏' : '展开侧栏'}
-              >
-                {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeft size={16} />}
-              </button>
-            </div>
-
-            {/* Sidebar placeholder content */}
-            <div className={`flex flex-1 flex-col items-center justify-center px-4 text-center ${sidebarOpen ? '' : 'hidden md:flex'}`}>
-              <div className="rounded-3xl bg-sage/30 p-4">
-                <Compass size={24} className="text-moss/60 avatar-spin" />
-              </div>
-              <p className="mt-4 text-sm leading-6 text-muted">
-                地图与工具面板
-              </p>
-              <p className="mt-1 text-xs leading-5 text-muted/60">
-                后续将集成地图浏览、知识库查询等辅助功能
-              </p>
-            </div>
-          </div>
-        </aside>
-
+      <div className="flex flex-1 overflow-hidden">
+        <HistoryPanel
+          open={historyOpen}
+          conversations={conversations}
+          activeId={activeConvId}
+          onSelect={handleSelectConversation}
+          onNew={handleNewConversation}
+          onDelete={handleDeleteConversation}
+          onClose={() => setHistoryOpen(false)}
+        />
         {/* ===== Chat Area ===== */}
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          {!historyOpen && (
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              className="absolute left-3 top-3 z-20 hidden h-9 items-center gap-1.5 rounded-3xl bg-paper/85 px-3 text-[12px] text-muted shadow-quiet transition hover:bg-paper hover:text-ink md:inline-flex"
+              title="会话历史"
+              aria-label="会话历史"
+            >
+              <History size={15} />
+              历史
+            </button>
+          )}
           {/* Messages */}
-          <section ref={scrollRef} onScroll={handleScroll} className="soft-scrollbar flex-1 overflow-y-auto px-4 pb-44 pt-6">
-            <div className="mx-auto flex w-full max-w-3xl flex-col gap-7">
+          <section ref={scrollRef} onScroll={handleScroll} className="soft-scrollbar flex-1 overflow-y-auto px-4 pb-8 pt-6">
+            <div className="mx-auto flex w-full max-w-5xl flex-col gap-7">
               {messages.map((message, index) => (
                 <MessageBubble
                   key={message.id}
                   message={message}
                   index={index}
                   showThinkingDetails={showThinkingDetails}
+                  isStreaming={isStreaming && message.id === streamingMessageId}
+                  onShowMap={revealMap}
+                  onInterruptDecision={(decision) => handleInterruptDecision(message.id, decision)}
                 />
               ))}
 
@@ -189,8 +478,8 @@ export default function App() {
           </section>
 
           {/* Input area (no longer fixed) */}
-          <div className="flex-shrink-0 bg-gradient-to-t from-[#F4F1EC] via-[#F4F1EC]/92 to-transparent px-4 pb-5 pt-16">
-            <form onSubmit={handleSubmit} className="mx-auto w-full max-w-3xl">
+          <div className="flex-shrink-0 bg-[#F4F1EC] px-4 pb-5 pt-3">
+            <form onSubmit={handleSubmit} className="mx-auto w-full max-w-5xl">
               {messages.length === 1 && (
                 <div className="mb-4 flex flex-wrap gap-2">
                   {suggestions.map((suggestion) => (
@@ -205,27 +494,27 @@ export default function App() {
                   ))}
                 </div>
               )}
-              <div className="flex items-end gap-3 rounded-4xl bg-paper/95 p-3 shadow-soft backdrop-blur-xl transition focus-within:shadow-focus">
-                <button
-                  type="button"
-                  onClick={() => setShowThinkingDetails((value) => !value)}
-                  className={[
-                    'mb-1 grid h-10 w-10 shrink-0 place-items-center rounded-3xl border transition',
-                    showThinkingDetails
-                      ? 'border-clayDeep/35 bg-clay/70 text-ink shadow-quiet'
-                      : 'border-line bg-paper/70 text-muted hover:border-clayDeep/30 hover:text-ink',
-                  ].join(' ')}
-                  aria-pressed={showThinkingDetails}
-                  aria-label={showThinkingDetails ? '隐藏思考过程' : '展示思考过程'}
-                  title={showThinkingDetails ? '隐藏思考过程' : '展示思考过程'}
-                >
-                  <BrainCircuit size={18} />
-                </button>
+              <div className="rounded-[2rem] bg-paper/95 p-2.5 shadow-soft backdrop-blur-xl transition focus-within:shadow-focus">
                 <textarea
                   ref={textareaRef}
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
+                  onCompositionStart={() => {
+                    isComposingRef.current = true
+                  }}
+                  onCompositionEnd={() => {
+                    isComposingRef.current = false
+                  }}
                   onKeyDown={(event) => {
+                    const nativeEvent = event.nativeEvent as KeyboardEvent & {
+                      isComposing?: boolean
+                      keyCode?: number
+                    }
+                    const isComposing =
+                      isComposingRef.current ||
+                      nativeEvent.isComposing ||
+                      nativeEvent.keyCode === 229
+                    if (isComposing) return
                     if (event.key === 'Enter' && !event.shiftKey) {
                       event.preventDefault()
                       void submit()
@@ -233,20 +522,178 @@ export default function App() {
                   }}
                   rows={1}
                   placeholder="描述你的目的地、日期、预算和旅行偏好..."
-                  className="max-h-44 min-h-[52px] flex-1 resize-none bg-transparent px-4 py-4 text-[15px] leading-6 text-ink outline-none placeholder:text-muted/70"
+                  className="max-h-36 min-h-[54px] w-full resize-none bg-transparent px-4 pb-0 pt-3 text-[15px] leading-6 text-ink outline-none placeholder:text-muted/70"
                 />
-                <button
-                  type="submit"
-                  disabled={!input.trim() || isStreaming}
-                  className="grid h-12 w-12 shrink-0 place-items-center rounded-3xl bg-ink text-paper shadow-quiet transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:bg-muted/40"
-                  aria-label="发送"
-                >
-                  {isStreaming ? <Loader2 className="animate-spin" size={18} /> : <ArrowUp size={18} />}
-                </button>
+                <div className="flex items-center justify-between gap-3 px-1 pb-0.5 pt-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDeepThinking((prev) => !prev)}
+                      className={[
+                        'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-3xl border px-3 text-[12px] font-medium transition',
+                        deepThinking
+                          ? 'border-clayDeep/35 bg-sage/45 text-moss shadow-quiet'
+                          : 'border-line bg-paper/70 text-muted hover:border-clayDeep/30 hover:text-ink',
+                      ].join(' ')}
+                      aria-pressed={deepThinking}
+                      title={deepThinking ? '深度思考已开启，模型会先推理再回答' : '开启深度思考，模型会先推理再回答'}
+                    >
+                      <Sparkles
+                        size={15}
+                        className={deepThinking ? 'text-moss' : ''}
+                      />
+                      <span>深度思考</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setWebSearch((prev) => {
+                          const next = !prev
+                          if (next) setKnowledgeSource('local') // 与云知识库互斥
+                          return next
+                        })
+                      }
+                      disabled={knowledgeSource === 'cloud'}
+                      className={[
+                        'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-3xl border px-3 text-[12px] font-medium transition',
+                        knowledgeSource === 'cloud'
+                          ? 'cursor-not-allowed border-line bg-paper/50 text-muted/40'
+                          : webSearch
+                            ? 'border-clayDeep/35 bg-sage/45 text-moss shadow-quiet'
+                            : 'border-line bg-paper/70 text-muted hover:border-clayDeep/30 hover:text-ink',
+                      ].join(' ')}
+                      aria-pressed={webSearch}
+                      title={
+                        knowledgeSource === 'cloud'
+                          ? '云知识库模式下不可用（与联网搜索互斥）'
+                          : webSearch
+                            ? '联网搜索已开启，每轮先用 Tavily 检索并把来源注入回答'
+                            : '开启联网搜索，回答会引用最新网页并标注来源编号'
+                      }
+                    >
+                      <Globe
+                        size={15}
+                        className={webSearch && knowledgeSource !== 'cloud' ? 'text-moss' : ''}
+                      />
+                      <span>联网搜索</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setKnowledgeSource((prev) => {
+                          const next = prev === 'local' ? 'cloud' : 'local'
+                          if (next === 'cloud') setWebSearch(false) // 与联网搜索互斥
+                          return next
+                        })
+                      }
+                      className={[
+                        'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-3xl border px-3 text-[12px] font-medium transition',
+                        knowledgeSource === 'cloud'
+                          ? 'border-clayDeep/35 bg-clay/70 text-ink shadow-quiet'
+                          : 'border-line bg-paper/70 text-muted hover:border-clayDeep/30 hover:text-ink',
+                      ].join(' ')}
+                      aria-pressed={knowledgeSource === 'cloud'}
+                      title={
+                        knowledgeSource === 'cloud'
+                          ? '当前使用云知识库（阿里云百炼），点击切换回本地知识库'
+                          : '当前使用本地知识库，点击切换到云知识库（阿里云百炼）'
+                      }
+                    >
+                      {knowledgeSource === 'cloud' ? <Cloud size={15} /> : <Database size={15} />}
+                      <span>{knowledgeSource === 'cloud' ? '云知识库' : '本地知识库'}</span>
+                      <ArrowLeftRight size={12} className="text-muted/70" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={toggleVoiceInput}
+                      disabled={!voiceSupported || isStreaming}
+                      className={[
+                        'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-3xl border px-3 text-[12px] font-medium transition',
+                        !voiceSupported || isStreaming
+                          ? 'cursor-not-allowed border-line bg-paper/50 text-muted/40'
+                          : isVoiceListening
+                            ? 'border-clayDeep/35 bg-clay/70 text-ink shadow-quiet'
+                            : 'border-line bg-paper/70 text-muted hover:border-clayDeep/30 hover:text-ink',
+                      ].join(' ')}
+                      aria-pressed={isVoiceListening}
+                      title={
+                        voiceSupported
+                          ? isVoiceListening
+                            ? '正在听写，点击结束语音输入'
+                            : '点击开始语音输入'
+                          : '当前浏览器不支持语音识别，请使用 Chrome 或 Edge'
+                      }
+                    >
+                      {isVoiceListening ? (
+                        <MicOff size={15} className="text-clayDeep" />
+                      ) : (
+                        <Mic size={15} />
+                      )}
+                      <span>{isVoiceListening ? '听写中' : '语音输入'}</span>
+                    </button>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={!input.trim() || isStreaming}
+                    className="grid h-11 w-11 shrink-0 place-items-center rounded-3xl bg-ink text-paper shadow-quiet transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:bg-muted/40"
+                    aria-label="发送"
+                  >
+                    {isStreaming ? <Loader2 className="animate-spin" size={18} /> : <ArrowUp size={18} />}
+                  </button>
+                </div>
               </div>
             </form>
           </div>
         </div>
+
+        {/* ===== Right Map Panel：由工具调用按需出现 ===== */}
+        {mapVisible && (
+          <aside
+            className="group relative hidden h-full shrink-0 overflow-hidden border-l border-line/60 bg-paper/35 backdrop-blur-sm transition-[width] duration-150 ease-out md:block"
+            style={{ width: mapWidth }}
+            aria-label="路线地图"
+          >
+            <button
+              type="button"
+              onPointerDown={handleMapResizeStart}
+              onPointerMove={handleMapResizeMove}
+              className="absolute left-0 top-0 z-20 grid h-full w-4 -translate-x-1/2 cursor-col-resize place-items-center text-muted/45 outline-none transition hover:text-clayDeep focus-visible:text-clayDeep"
+              title="拖动调整聊天与地图宽度"
+              aria-label="拖动调整聊天与地图宽度"
+            >
+              <span className="grid h-16 w-3 place-items-center rounded-full bg-paper/90 shadow-quiet ring-1 ring-line/70">
+                <GripVertical size={13} />
+              </span>
+            </button>
+            <div className="relative flex h-full flex-col">
+              <div className="absolute right-3 top-3 z-10 flex gap-2">
+                <button
+                  type="button"
+                  onClick={closeMap}
+                  className="grid h-8 w-8 place-items-center rounded-2xl bg-paper/85 text-muted shadow-quiet transition hover:bg-paper hover:text-ink"
+                  title="隐藏地图"
+                  aria-label="隐藏地图"
+                >
+                  <PanelRightClose size={15} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    mapPanelRef.current?.clear()
+                    setLatestMapPayloads([])
+                    setMapVisible(false)
+                  }}
+                  className="grid h-8 w-8 place-items-center rounded-2xl bg-paper/85 text-muted shadow-quiet transition hover:bg-paper hover:text-ink"
+                  title="清空并关闭地图"
+                  aria-label="清空并关闭地图"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <MapPanel ref={mapPanelRef} routes={latestMapPayloads} />
+            </div>
+          </aside>
+        )}
       </div>
     </main>
   )
@@ -256,10 +703,16 @@ function MessageBubble({
   message,
   index,
   showThinkingDetails,
+  isStreaming: parentIsStreaming,
+  onShowMap,
+  onInterruptDecision,
 }: {
   message: ChatMessage
   index: number
   showThinkingDetails: boolean
+  isStreaming: boolean
+  onShowMap?: (payloads: MapPayload[] | MapPayload) => void
+  onInterruptDecision?: (decision: boolean) => void
 }) {
   const isUser = message.role === 'user'
   const parsedContent = isUser ? { answer: message.content, reasoning: '' } : splitReasoningContent(message.content)
@@ -293,7 +746,7 @@ function MessageBubble({
       {/* Message content */}
       <div
         className={[
-          'max-w-[80%] text-[15px] md:max-w-[70%]',
+          'max-w-[92%] text-[15px] md:max-w-[86%] xl:max-w-[82%]',
           isUser
             ? 'rounded-4xl bg-clay px-5 py-4 text-ink shadow-quiet'
             : 'rounded-3xl py-2 pr-3 text-ink',
@@ -305,19 +758,556 @@ function MessageBubble({
             WanderBot
           </div>
         )}
-        {!isUser && displayTrace && (
+        {!isUser && displayTrace && !message.thinkingSteps && (
           <ThinkingPanel trace={displayTrace} forceOpen={showThinkingDetails} />
         )}
+        {!isUser && message.thinkingSteps && (
+          <ReactThinkingBlock steps={message.thinkingSteps} isStreaming={parentIsStreaming} />
+        )}
+        {!isUser &&
+          message.webSources &&
+          message.webSources.status === 'success' &&
+          message.webSources.sources.length > 0 && (
+            <WebSearchTrace bundle={message.webSources} />
+          )}
         {isUser ? (
           <p className="whitespace-pre-wrap leading-7">{message.content}</p>
         ) : (
-          <ReactMarkdown remarkPlugins={[remarkGfm]} className="markdown-body">
-            {parsedContent.answer || ' '}
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            className="markdown-body"
+            components={citationMarkdownComponents(message.id)}
+          >
+            {withCitationLinks(parsedContent.answer || ' ', Boolean(message.webSources?.sources.length))}
           </ReactMarkdown>
+        )}
+        {!isUser && getMessageMapRoutes(message).length > 0 && (
+          <MapRevealButton payloads={getMessageMapRoutes(message)} onShowMap={onShowMap} />
+        )}
+        {!isUser && message.itinerary && (
+          <ItineraryCard itinerary={message.itinerary} />
+        )}
+        {!isUser && message.exports && message.exports.length > 0 && (
+          <ExportLinks exports={message.exports} />
+        )}
+        {!isUser && message.webSources && (
+          <SourcesPanel messageId={message.id} bundle={message.webSources} />
+        )}
+        {!isUser && message.pendingInterrupt && (
+          <InterruptBar
+            interrupt={message.pendingInterrupt}
+            onDecision={(decision) => onInterruptDecision?.(decision)}
+          />
         )}
       </div>
     </motion.article>
   )
+}
+
+function InterruptBar({
+  interrupt,
+  onDecision,
+}: {
+  interrupt: PendingInterrupt
+  onDecision: (decision: boolean) => void
+}) {
+  const disabled = interrupt.status !== 'pending'
+  return (
+    <div className="mt-3 rounded-3xl border border-clayDeep/30 bg-clay/30 px-4 py-3 shadow-quiet">
+      <div className="mb-2 flex items-center gap-2 text-[12px] font-medium text-clayDeep">
+        <Sparkles size={13} /> 需要你确认这个操作
+      </div>
+      <div className="text-sm text-ink">{interrupt.summary}</div>
+      <details className="mt-1 text-xs text-muted">
+        <summary className="cursor-pointer select-none">查看详情</summary>
+        <pre className="mt-2 max-h-44 overflow-auto rounded-2xl bg-paper/80 p-3 text-[11px] leading-5 text-ink soft-scrollbar">
+          {JSON.stringify(interrupt.details, null, 2)}
+        </pre>
+      </details>
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onDecision(true)}
+          className="rounded-2xl bg-ink px-4 py-1.5 text-[12px] text-paper shadow-quiet transition hover:bg-clayDeep disabled:cursor-not-allowed disabled:bg-muted/40"
+        >
+          {interrupt.status === 'approved' ? '已同意' : '同意,继续'}
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onDecision(false)}
+          className="rounded-2xl border border-line bg-paper px-4 py-1.5 text-[12px] text-muted transition hover:bg-canvas disabled:cursor-not-allowed"
+        >
+          {interrupt.status === 'rejected' ? '已拒绝' : '取消'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// 把答案里的 [n] 转成 markdown 链接 [n](wb-cite:n)，由下面的自定义 a 组件渲染成可点击角标。
+function withCitationLinks(text: string, hasSources: boolean): string {
+  if (!hasSources) return text
+  return text.replace(/\[(\d{1,2})\]/g, '[$1](wb-cite:$1)')
+}
+
+function scrollToCitation(messageId: string, n: string) {
+  const el = document.getElementById(`wb-src-${messageId}-${n}`)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.classList.remove('wb-cite-flash')
+  void el.offsetWidth // 触发重排以重启动画
+  el.classList.add('wb-cite-flash')
+}
+
+function citationMarkdownComponents(messageId: string): Components {
+  return {
+    a({ href, children, ...props }) {
+      const h = typeof href === 'string' ? href : ''
+      if (h.startsWith('wb-cite:')) {
+        const n = h.slice('wb-cite:'.length)
+        return (
+          <sup>
+            <button
+              type="button"
+              onClick={() => scrollToCitation(messageId, n)}
+              className="mx-0.5 rounded bg-clay/60 px-1 text-[10px] font-semibold text-clayDeep transition hover:bg-clay"
+              title={`查看来源 ${n}`}
+            >
+              {n}
+            </button>
+          </sup>
+        )
+      }
+      return (
+        <a href={h} target="_blank" rel="noopener noreferrer" {...props}>
+          {children}
+        </a>
+      )
+    },
+  }
+}
+
+// 思考过程里的「联网检索」块:两种模式都展示网页 URL（满足硬性要求）。
+function WebSearchTrace({ bundle }: { bundle: WebSourceBundle }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <div className="mb-3 overflow-hidden rounded-3xl border border-sage/50 bg-[#F4F8F1] shadow-quiet">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition hover:bg-[#E8F0E0]"
+        aria-expanded={open}
+      >
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-2xl bg-sage/55 text-moss">
+          <Globe size={16} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[13px] font-medium text-ink">联网检索</span>
+          <span className="block truncate text-xs text-muted">
+            “{bundle.query}” · 命中 {bundle.sources.length} 个网页
+          </span>
+        </span>
+        <ChevronDown
+          size={16}
+          className={`shrink-0 text-muted transition ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open && (
+        <ol className="space-y-1.5 border-t border-sage/30 px-3 py-2">
+          {bundle.sources.map((s) => (
+            <li key={s.n} className="flex gap-2 text-xs leading-5">
+              <span className="shrink-0 font-medium text-moss">[{s.n}]</span>
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-w-0 break-all text-muted hover:text-clayDeep"
+                title={s.title}
+              >
+                {s.url}
+              </a>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+function ExportLinks({ exports }: { exports: ExportInfo[] }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {exports.map((info) => (
+        <a
+          key={`${info.itinerary_id}-${info.format}`}
+          href={resolveDownloadUrl(info.download_url)}
+          download={info.filename}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 rounded-2xl bg-ink px-3 py-1.5 text-[12px] text-paper shadow-quiet transition hover:translate-y-[-1px] hover:bg-clayDeep"
+        >
+          <Download size={12} />
+          下载 {info.format.toUpperCase()} · {info.size_text}
+        </a>
+      ))}
+    </div>
+  )
+}
+
+function MapRevealButton({
+  payloads,
+  onShowMap,
+}: {
+  payloads: MapPayload[]
+  onShowMap?: (payloads: MapPayload[]) => void
+}) {
+  const stopCount = payloads.reduce((sum, item) => sum + item.markers.length, 0)
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={() => onShowMap?.(payloads)}
+        className="inline-flex items-center gap-2 rounded-3xl border border-clayDeep/20 bg-paper/90 px-4 py-2 text-[12px] font-medium text-ink shadow-quiet transition hover:-translate-y-0.5 hover:border-clayDeep/35 hover:bg-[#F8F6F1]"
+      >
+        <Compass size={14} className="text-clayDeep" />
+        {payloads.length > 1 ? '查看每日路线地图' : '查看路线地图'}
+        <span className="rounded-full bg-clay/45 px-2 py-0.5 text-[10px] text-clayDeep">
+          {payloads.length > 1 ? `${payloads.length} 天` : `${stopCount} 个地点`}
+        </span>
+      </button>
+    </div>
+  )
+}
+
+function getMessageMapRoutes(message: ChatMessage): MapPayload[] {
+  if (message.mapPayloads?.length) return message.mapPayloads
+  return message.mapPayload ? [message.mapPayload] : []
+}
+
+function appendMapRouteToMessage(message: ChatMessage, route: MapPayload): ChatMessage {
+  const routes = getMessageMapRoutes(message)
+  const routeKey = getMapRouteKey(route)
+  const nextRoutes = routes.some((item) => getMapRouteKey(item) === routeKey)
+    ? routes.map((item) => (getMapRouteKey(item) === routeKey ? route : item))
+    : [...routes, route]
+
+  return {
+    ...message,
+    mapPayload: nextRoutes[0],
+    mapPayloads: nextRoutes,
+    thinkingTrace: upsertMapTraceStep(
+      message.thinkingTrace,
+      route.route_name,
+      route.markers.length,
+    ),
+  }
+}
+
+function getMapRouteKey(route: MapPayload) {
+  return `${route.route_name || 'route'}:${route.markers.map((marker) => marker.name).join('>')}`
+}
+
+function dropTrailingDuplicateUserMessage(messages: ChatMessage[], content: string) {
+  const last = messages[messages.length - 1]
+  if (last?.role === 'user' && last.content.trim() === content) {
+    return messages.slice(0, -1)
+  }
+  return messages
+}
+
+function buildStreamCallbacks(
+  assistantId: string,
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
+  conversationIdRef: React.MutableRefObject<string | null>,
+) {
+  return {
+    onDelta: (delta: string) => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? { ...message, content: stripToolMarkup(message.content + delta) }
+            : message,
+        ),
+      )
+    },
+    onAnswerChunk: (text: string) => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? { ...message, content: stripToolMarkup(message.content + text) }
+            : message,
+        ),
+      )
+    },
+    onThinkingStart: () => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId ? { ...message, thinkingSteps: [] } : message,
+        ),
+      )
+    },
+    onThought: (text: string, step: number) => {
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== assistantId) return message
+          const steps = [...(message.thinkingSteps ?? [])]
+          const last = steps[steps.length - 1]
+          // 流式追加到同一步的 thought
+          if (last && last.type === 'thought' && last.step === step) {
+            steps[steps.length - 1] = { ...last, text: (last.text ?? '') + text }
+          } else {
+            steps.push({ type: 'thought', text, step })
+          }
+          return { ...message, thinkingSteps: steps }
+        }),
+      )
+    },
+    onAction: (payload: { tool: string; args: Record<string, unknown>; tool_call_id: string; step: number }) => {
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== assistantId) return message
+          const steps = [...(message.thinkingSteps ?? [])]
+          steps.push({
+            type: 'action',
+            tool: payload.tool,
+            args: payload.args,
+            tool_call_id: payload.tool_call_id,
+            step: payload.step,
+          })
+          return { ...message, thinkingSteps: steps }
+        }),
+      )
+    },
+    onObservation: (payload: { tool: string; summary: string; tool_call_id: string }) => {
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== assistantId) return message
+          const steps = [...(message.thinkingSteps ?? [])]
+          steps.push({
+            type: 'observation',
+            tool: payload.tool,
+            summary: payload.summary,
+            tool_call_id: payload.tool_call_id,
+          })
+          return { ...message, thinkingSteps: steps }
+        }),
+      )
+    },
+    onThinkingEnd: (payload: { duration_ms: number; steps: number; summary: string }) => {
+      // 可以留作后续使用,暂时只更新 thinkingTrace summary
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== assistantId) return message
+          const trace = message.thinkingTrace
+            ? { ...message.thinkingTrace, summary: payload.summary || `思考完成 (${(payload.duration_ms / 1000).toFixed(1)}s)` }
+            : message.thinkingTrace
+          return { ...message, thinkingTrace: trace }
+        }),
+      )
+    },
+    onMeta: (meta: unknown) => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? { ...message, thinkingTrace: updateThinkingTrace(message.thinkingTrace, meta) }
+            : message,
+        ),
+      )
+    },
+    onMapData: (mapPayload: MapPayload) => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId ? appendMapRouteToMessage(message, mapPayload) : message,
+        ),
+      )
+    },
+    onItinerary: (itinerary: Itinerary) => {
+      setMessages((current) =>
+        current.map((message) => (message.id === assistantId ? { ...message, itinerary } : message)),
+      )
+    },
+    onWebSources: (bundle: WebSourceBundle) => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId ? { ...message, webSources: bundle } : message,
+        ),
+      )
+    },
+    onExport: (info: ExportInfo) => {
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== assistantId) return message
+          const existing = message.exports ?? []
+          const next = existing.filter(
+            (item) =>
+              !(item.itinerary_id === info.itinerary_id && item.format === info.format),
+          )
+          next.push(info)
+          return { ...message, exports: next }
+        }),
+      )
+    },
+    onInterrupt: (payload: { thread_id: string; payload: Record<string, unknown> }) => {
+      const value = payload.payload as Record<string, any>
+      const interrupt: PendingInterrupt = {
+        thread_id: payload.thread_id,
+        tool_name: String(value.tool_name ?? ''),
+        summary: String(value.summary ?? '需要你确认这一步操作'),
+        details: (value.details ?? {}) as Record<string, unknown>,
+        status: 'pending',
+      }
+      setMessages((current) =>
+        current.map((m) => (m.id === assistantId ? { ...m, pendingInterrupt: interrupt } : m)),
+      )
+    },
+    onThreadId: (threadId: string) => {
+      // 我们已客户端生成并下发 conversation_id,后端通常原样回传;
+      // 仍同步一次,确保 active 会话指向它。
+      conversationIdRef.current = threadId
+      setActiveId(threadId)
+    },
+  }
+}
+
+function resolveDownloadUrl(path: string): string {
+  // 后端返回的是 '/api/exports/xxx'。生产环境 API_BASE 是相对路径时，直接交给 Nginx 反代。
+  if (API_BASE.startsWith('/')) {
+    return path
+  }
+  const origin = API_BASE.replace(/\/api\/?$/, '')
+  return origin + path
+}
+
+function ReactThinkingBlock({ steps, isStreaming }: { steps: ThinkingStep[]; isStreaming: boolean }) {
+  const [expanded, setExpanded] = useState(isStreaming)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [autoScroll, setAutoScroll] = useState(true)
+  const wasStreamingRef = useRef(isStreaming)
+
+  useEffect(() => {
+    if (autoScroll && containerRef.current) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight
+    }
+  }, [steps, autoScroll])
+
+  useEffect(() => {
+    if (isStreaming && !wasStreamingRef.current) {
+      setExpanded(true)
+    } else if (wasStreamingRef.current && !isStreaming) {
+      setExpanded(false)
+    }
+    wasStreamingRef.current = isStreaming
+  }, [isStreaming])
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.target as HTMLDivElement
+    setAutoScroll(scrollHeight - scrollTop - clientHeight < 50)
+  }
+
+  const isThinking = isStreaming
+  const lastThought = steps.filter((s) => s.type === 'thought').pop()
+
+  return (
+    <div className="mb-3 animate-in fade-in overflow-hidden rounded-3xl border border-sage/50 bg-[#F4F8F1] shadow-quiet duration-300">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition hover:bg-[#E8F0E0]"
+        aria-expanded={expanded}
+      >
+        <span className="relative grid h-8 w-8 shrink-0 place-items-center rounded-2xl bg-sage/55 text-moss">
+          {isThinking && (
+            <span className="absolute right-0 top-0 h-2 w-2 rounded-full bg-moss animate-ping" />
+          )}
+          <BrainCircuit size={16} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[13px] font-medium text-ink">深度思考</span>
+          <span className="block truncate text-xs text-muted">
+            {isThinking ? '正在推理中…' : `已完成推理（${steps.length} 步）`}
+          </span>
+        </span>
+        <ChevronDown
+          size={16}
+          className={`shrink-0 text-muted transition ${expanded ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      {expanded && (
+        <div
+          ref={containerRef}
+          onScroll={handleScroll}
+          className="soft-scrollbar max-h-[320px] overflow-y-auto border-t border-sage/30 px-3 pb-3 pt-2"
+        >
+          <div className="space-y-1.5">
+            {steps.map((s, idx) => (
+              <ReactStepItem key={idx} step={s} isLast={idx === steps.length - 1} isStreaming={isThinking} />
+            ))}
+          </div>
+          {isThinking && (
+            <div className="mt-2 flex items-center gap-1.5 px-1 text-xs text-muted">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-moss" />
+              思考中
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ReactStepItem({ step, isLast, isStreaming }: { step: ThinkingStep; isLast: boolean; isStreaming: boolean }) {
+  const [showArgs, setShowArgs] = useState(false)
+
+  if (step.type === 'thought') {
+    return (
+      <div className="flex gap-2 rounded-2xl px-2 py-1.5">
+        <span className="mt-0.5 shrink-0 text-sm" aria-label="思考">💭</span>
+        <p className="text-xs leading-6 text-ink">
+          {step.text}
+          {isLast && isStreaming && (
+            <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-moss" />
+          )}
+        </p>
+      </div>
+    )
+  }
+
+  if (step.type === 'action') {
+    return (
+      <div className="flex gap-2 rounded-2xl px-2 py-1.5">
+        <span className="mt-0.5 shrink-0 text-sm" aria-label="工具调用">🔧</span>
+        <div className="min-w-0">
+          <span className="text-xs font-medium text-ink">{step.tool}</span>
+          <button
+            type="button"
+            onClick={() => setShowArgs((v) => !v)}
+            className="ml-1.5 rounded-full bg-sage/30 px-2 py-0.5 text-[10px] text-moss transition hover:bg-sage/50"
+          >
+            {showArgs ? '收起参数' : '参数'}
+          </button>
+          {showArgs && step.args && (
+            <pre className="mt-1 max-h-32 overflow-auto rounded-2xl bg-paper/80 p-2 text-[10px] leading-4 text-muted soft-scrollbar">
+              {JSON.stringify(step.args, null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (step.type === 'observation') {
+    return (
+      <div className="flex gap-2 rounded-2xl px-2 py-1.5">
+        <span className="mt-0.5 shrink-0 text-sm" aria-label="工具结果">📊</span>
+        <p className="text-xs leading-6 text-muted">{step.summary || '已获取结果'}</p>
+      </div>
+    )
+  }
+
+  return null
 }
 
 function ThinkingPanel({ trace, forceOpen }: { trace: ThinkingTrace; forceOpen: boolean }) {
@@ -410,7 +1400,41 @@ function getStatusLabel(status: ThinkingTraceStep['status']) {
   return '等待'
 }
 
-function createPendingTrace(): ThinkingTrace {
+function createPendingTrace(knowledgeSource: 'local' | 'cloud' = 'local'): ThinkingTrace {
+  if (knowledgeSource === 'cloud') {
+    return {
+      provider: 'bailian_app',
+      runtime: 'bailian_app',
+      summary: '等待百炼应用返回回答流程',
+      steps: [
+        {
+          id: 'query',
+          title: '整理用户问题',
+          status: 'active',
+          detail: '正在把本轮问题整理为百炼应用可接收的输入。',
+        },
+        {
+          id: 'route',
+          title: '调用百炼云知识库应用',
+          status: 'pending',
+          detail: '等待后端携带 API Key、业务空间和应用 ID 调用百炼应用。',
+        },
+        {
+          id: 'context',
+          title: '云端检索与生成',
+          status: 'pending',
+          detail: '百炼应用会在云端自行选择知识库、检索资料并生成回答；本地系统无法读取其内部召回片段。',
+        },
+        {
+          id: 'prompt',
+          title: '接收百炼应用回答',
+          status: 'pending',
+          detail: '等待百炼应用的流式输出接入本地对话窗口。',
+        },
+      ],
+    }
+  }
+
   return {
     summary: '等待检索和路由信息',
     steps: [
@@ -453,6 +1477,58 @@ function updateThinkingTrace(existingTrace: ThinkingTrace | undefined, payload: 
   const runtime = typeof payload.runtime === 'string' ? payload.runtime : trace.runtime
   const query = typeof payload.rag_query === 'string' ? payload.rag_query : ''
   const reasoning = typeof payload.rag_reasoning === 'string' ? payload.rag_reasoning : ''
+  const cloudMode = payload.rag_cloud_mode === 'bailian_app'
+
+  if (cloudMode) {
+    return {
+      ...trace,
+      provider,
+      model,
+      runtime,
+      summary: '已交由百炼应用完成知识库检索与回答生成',
+      steps: [
+        {
+          id: 'query',
+          title: '整理用户问题',
+          status: 'done',
+          detail: query || '已把本轮问题发送给百炼应用。',
+          data: query ? { rag_query: query } : undefined,
+        },
+        {
+          id: 'route',
+          title: '调用百炼云知识库应用',
+          status: 'done',
+          detail: reasoning || '百炼应用会根据自身配置选择模型、知识库和回答流程。',
+          data: compactRecord({
+            cloud_mode: '百炼应用',
+            app_id: model,
+            workspace: '由后端配置',
+            internal_trace_available: false,
+          }),
+        },
+        {
+          id: 'context',
+          title: '云端检索与生成',
+          status: 'done',
+          detail: '云知识库的检索路由、召回片段和上下文注入发生在百炼应用内部，当前接口不会返回这些明细。',
+          data: compactRecord({
+            visible_to_local_system: false,
+            note: '前端仅展示百炼应用返回的最终回答。',
+          }),
+        },
+        {
+          id: 'prompt',
+          title: '接收百炼应用回答',
+          status: 'done',
+          detail: '系统已接入百炼应用的流式输出，并把回答按本地 SSE 协议展示给用户。',
+          data: compactRecord({
+            stream_bridge: 'DashScope SSE -> WanderBot SSE',
+          }),
+        },
+        ...trace.steps.filter((step) => step.id.startsWith('tool-')),
+      ],
+    }
+  }
 
   return {
     ...trace,
@@ -506,6 +1582,21 @@ function updateThinkingTrace(existingTrace: ThinkingTrace | undefined, payload: 
   }
 }
 
+function upsertMapTraceStep(
+  trace: ThinkingTrace | undefined,
+  routeName: string,
+  stopCount: number,
+): ThinkingTrace {
+  const baseTrace = trace ?? createPendingTrace()
+  return upsertTraceStep(baseTrace, {
+    id: 'map-data',
+    title: '路线地图已准备',
+    status: 'done',
+    detail: `已准备"${routeName}"路线地图，共 ${stopCount} 个停靠点。回答完成后可点击按钮查看。`,
+    data: { route_name: routeName, stops: stopCount },
+  })
+}
+
 function upsertTraceStep(trace: ThinkingTrace, step: ThinkingTraceStep): ThinkingTrace {
   const nextSteps = trace.steps.some((item) => item.id === step.id)
     ? trace.steps.map((item) => (item.id === step.id ? step : item))
@@ -549,7 +1640,7 @@ function splitReasoningContent(content: string): { answer: string; reasoning: st
     ['<|begin_of_thought|>', '<|end_of_thought|>'],
   ] as const
 
-  let answer = content
+  let answer = stripToolMarkup(content)
   const reasoningParts: string[] = []
 
   for (const [openTag, closeTag] of tagPairs) {
@@ -570,9 +1661,31 @@ function splitReasoningContent(content: string): { answer: string; reasoning: st
   }
 
   return {
-    answer: answer.trim(),
+    answer: stripToolMarkup(answer).trim(),
     reasoning: reasoningParts.join('\n\n'),
   }
+}
+
+const DSML_TOOL_MARKUP_RE =
+  /&lt;\s*\|\s*\|\s*DSML[\s\S]*?(?:tool_calls?&gt;|$)|<\s*\|\s*\|\s*DSML\s*\|\s*\|\s*tool_calls?\b[\s\S]*?<\/\s*\|\s*\|\s*DSML\s*\|\s*\|\s*tool_calls?\s*>|<\s*\|\s*\|\s*DSML[\s\S]*?(?:tool_calls?>|\|\s*\|\s*tool_calls?\s*>|$)|<\/?\s*(?:\|\s*\|\s*DSML\s*\|\s*\||｜\s*｜\s*DSML\s*｜\s*｜)\s*(?:tool_calls?|invoke|parameter|function_calls?)\b[^>]*>|<[^>]*｜[^>]*>|<\/?\s*｜?｜?\s*DSML\s*｜?｜?[^>]*>|<\/?\s*(?:invoke|parameter|tool_calls?|function_calls?)\b[^>]*>|｜+\s*DSML\s*｜+|\|\s*\|\s*DSML\s*\|\s*\|/gi
+const DSML_PARTIAL_MARKUP_RE =
+  /<\s*\|\s*\|\s*DSML[\s\S]*$|&lt;\s*\|\s*\|\s*DSML[\s\S]*$|<\s*｜\s*｜\s*DSML[\s\S]*$/i
+
+function stripToolMarkup(text: string) {
+  if (!text) return text
+  return text
+    .replace(DSML_TOOL_MARKUP_RE, '')
+    .replace(DSML_PARTIAL_MARKUP_RE, '')
+    .replace(
+      /(?:让我先查实时信息。|让我们先查实时信息。|我先查实时信息。)?\s*(?:\{["']?状态["']?\s*:\s*["']?(?:success|failed)[\s\S]*?["']?使用提示["']?\s*:\s*["'][^"']*["']\s*\})+/gi,
+      '',
+    )
+    .replace(
+      /(?:\{["']?status["']?\s*:\s*["']?(?:success|failed)[\s\S]*?["']?results?["']?\s*:\s*\[[\s\S]*?\]\s*\})+/gi,
+      '',
+    )
+    .replace(/�/g, '')
+    .trim()
 }
 
 function appendReasoningTextStep(trace: ThinkingTrace | undefined, reasoning: string): ThinkingTrace {

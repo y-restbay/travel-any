@@ -11,6 +11,12 @@ LLM_TOKEN_USAGE_TOTAL = Counter(
     ("model_name", "token_type"),
 )
 
+LLM_REQUESTS_TOTAL = Counter(
+    "wanderbot_llm_requests_total",
+    "Total LLM requests by model and runtime.",
+    ("model_name", "runtime"),
+)
+
 LLM_REQUEST_DURATION_SECONDS = Histogram(
     "wanderbot_llm_request_duration_seconds",
     "LLM request duration in seconds by model and runtime.",
@@ -41,6 +47,7 @@ def llm_duration_timer(model_name: str, runtime: str) -> Iterator[None]:
     try:
         yield
     finally:
+        LLM_REQUESTS_TOTAL.labels(model_name=model_name, runtime=runtime).inc()
         LLM_REQUEST_DURATION_SECONDS.labels(model_name=model_name, runtime=runtime).observe(
             time.perf_counter() - start
         )
