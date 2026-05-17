@@ -12,7 +12,13 @@ services:
     volumes:
       - api-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6688/api/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6688/api/health', timeout=3).read()",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
