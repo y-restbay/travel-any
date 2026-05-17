@@ -12,6 +12,7 @@
  * 个人本地原型足够;真要无限历史/跨设备请走 Phase B 后端方案。
  */
 import type { ChatMessage } from '../types'
+import { createId } from './uuid'
 
 const INDEX_KEY = 'wanderbot:conversations'
 const ACTIVE_KEY = 'wanderbot:active_conv'
@@ -104,7 +105,7 @@ export function setActiveId(id: string): void {
 
 /** 生成新会话 id 并设为当前;此刻不写索引,等首条真实保存时再建条目,避免空会话刷屏。 */
 export function createConversation(): string {
-  const id = crypto.randomUUID()
+  const id = createId()
   setActiveId(id)
   return id
 }

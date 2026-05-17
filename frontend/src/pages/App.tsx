@@ -42,6 +42,7 @@ import {
   setActiveId,
 } from '../lib/conversationStore'
 import { API_BASE, getAdminConfig, resumeChat, streamChat } from '../api'
+import { createId } from '../lib/uuid'
 import type { AgentRuntime, ChatMessage, ExportInfo, Itinerary, MapPayload, PendingInterrupt, ThinkingStep, ThinkingTrace, ThinkingTraceStep, WebSourceBundle } from '../types'
 
 const DEFAULT_MAP_WIDTH = 420
@@ -329,8 +330,8 @@ export default function App() {
       setActiveConvId(id)
     }
 
-    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', content }
-    const assistantId = crypto.randomUUID()
+    const userMessage: ChatMessage = { id: createId(), role: 'user', content }
+    const assistantId = createId()
     const assistantMessage: ChatMessage = {
       id: assistantId,
       role: 'assistant',
