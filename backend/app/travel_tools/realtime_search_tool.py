@@ -5,6 +5,7 @@ import copy
 import hashlib
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from .tavily_client import TavilySearchClient
 
@@ -152,21 +153,36 @@ async def handle_realtime_search(args: Dict[str, Any], *, api_key: Optional[str]
             "建议": "请告知用户搜索功能暂时不可用,基于已知信息回答",
         }
 
+    # 质量过滤:按 Tavily 相关度排序 → 同域名去重 → 丢弃明显跑题的低分结果
+    # (但有强结果时才丢,避免全部低分时返回空)
+    results_raw = raw.get("results", []) or []
+    seen_domains: set[str] = set()
+    deduped = []
+    for r in sorted(results_raw, key=lambda x: x.get("score", 0) or 0, reverse=True):
+        domain = urlparse(r.get("url", "") or "").netloc.lower()
+        if domain and domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        deduped.append(r)
+    strong = [r for r in deduped if (r.get("score", 0) or 0) >= 0.4]
+    final = (strong if len(strong) >= 2 else deduped)[:max_results]
+
     # 精简返回结构
     result = {
         "状态": "success",
         "查询": query,
         "时效范围": time_range,
         "AI摘要": raw.get("answer", ""),
-        "结果数": len(raw.get("results", [])),
+        "结果数": len(final),
         "结果": [
             {
                 "标题": r.get("title", ""),
-                "摘要": r.get("content", "")[:300],
+                "摘要": (r.get("content", "") or "")[:800],
                 "链接": r.get("url", ""),
                 "发布时间": r.get("published_date", "未知"),
+                "相关度": round(r.get("score", 0) or 0, 3),
             }
-            for r in raw.get("results", [])
+            for r in final
         ],
         "使用提示": "请在回答中引用来源,提醒用户出行前再次确认",
     }

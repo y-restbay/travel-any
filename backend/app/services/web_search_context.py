@@ -10,18 +10,48 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from app.schemas.chat import ChatMessage
 from app.travel_tools.realtime_search_tool import handle_realtime_search
 
+# 口语/规划类填充词,丢给搜索引擎纯属噪音,检索前剔除
+_FILLER_RE = re.compile(
+    r"帮我看看|帮我查查?|帮我搜一?下?|帮我规划一下|帮我安排一下|帮我推荐|帮我|帮忙|"
+    r"麻烦你|麻烦|我想问一?下|想问一?下|我想知道|我想|我要|请问|请|"
+    r"顺便|可以吗|好吗|谢谢|规划一下|安排一下|看看"
+)
+
 
 def _query_from_messages(messages: List[ChatMessage]) -> str:
-    """直接用用户最近一条提问作为检索 query，不做拼接/改写处理。"""
+    """启发式构造检索 query:会话目的地 + 用户问题(去口语填充、截断)。
+
+    不做 LLM 改写(零延迟)。Tavily 偏好"地点+主题"的精简关键词,
+    用户原话常是长口语句,逐字照搬会显著拉低召回质量。
+    """
     user_texts = [m.content.strip() for m in messages if m.role == "user" and m.content.strip()]
     if not user_texts:
         return "最新旅行信息"
-    return user_texts[-1]
+    raw_q = user_texts[-1]
+
+    # 1. 去口语/规划填充词,合并空白;全被剔除则回退原句,绝不交空 query
+    cleaned = re.sub(r"\s+", " ", _FILLER_RE.sub(" ", raw_q)).strip(" ，,。.、")
+    if not cleaned:
+        cleaned = raw_q
+
+    # 2. 会话已知目的地补进 query(用户没在本句重复时)
+    try:
+        from app.services.session_context_service import build_session_context
+
+        destination = (build_session_context(messages).destination or "").strip()
+    except Exception:
+        destination = ""
+    if destination and destination not in cleaned:
+        cleaned = f"{destination} {cleaned}"
+
+    # 3. Tavily 偏好精简关键词,过长截断
+    return cleaned[:80].strip()
 
 
 def _build_prompt_block(sources: List[Dict[str, Any]], answer_summary: str) -> str:
@@ -46,6 +76,16 @@ _DEGRADE_BLOCK = (
     "## 联网检索\n"
     "本轮联网检索不可用或无结果，请基于已有知识与本地资料回答，"
     "不要编造来源，也不要强制添加编号标注。"
+)
+
+# 联网搜索开关「未开启」时注入：模型无实时检索能力，遇到时效性诉求按提示词引导用户开启开关。
+WEB_SEARCH_OFF_BLOCK = (
+    "## 联网搜索（当前未开启）\n"
+    "你当前没有实时联网检索能力（用户未开启「联网搜索」开关）。\n"
+    "- 若用户问题依赖最新/实时信息（近期活动与排期、临时闭馆或限流、最新签证与交通政策、"
+    "突发情况，或含「最近/现在/今年/这个月/还开吗」等时效表述）：不要编造或臆测实时内容，"
+    "应明确、简短地告知用户——该问题需要实时联网信息，请点击输入框上方的「联网搜索」开关开启后重新提问。\n"
+    "- 其余基于稳定常识与本地资料可正常回答，无需提醒。"
 )
 
 

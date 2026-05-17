@@ -9,6 +9,7 @@
     "preview": "vite preview --host 127.0.0.1 --port 6789"
   },
   "dependencies": {
+    "@amap/amap-jsapi-loader": "^1.0.1",
     "@vitejs/plugin-react": "^4.3.4",
     "framer-motion": "^11.18.2",
     "lucide-react": "^0.468.0",

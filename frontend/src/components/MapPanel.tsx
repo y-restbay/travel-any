@@ -17,6 +17,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import AMapLoader from '@amap/amap-jsapi-loader'
 import { Compass, Loader2, MapPin, Navigation, RefreshCcw, Sparkles } from 'lucide-react'
 import type { MapPayload } from '../types'
 
@@ -26,6 +27,8 @@ const AMAP_VERSION = '2.0'
 const AMAP_PLUGINS = 'AMap.Polyline,AMap.Marker'
 const OVERVIEW_COLOR = '#2F2A25'
 const ROUTE_COLORS = ['#B98D68', '#65735D', '#5876A6', '#A86F7A', '#7D6CA8', '#B59B48']
+const MAP_STYLE = 'amap://styles/normal'
+const MAP_FEATURES = ['bg', 'road', 'point', 'building']
 
 export type MapPanelHandle = {
   renderRoute: (payload: MapPayload) => void
@@ -42,12 +45,18 @@ type AMapState =
   | { stage: 'ready' }
   | { stage: 'error'; reason: string }
 
+const MAP_PADDING: [number, number, number, number] = [60, 60, 60, 60]
+
 const MapPanel = forwardRef<MapPanelHandle, MapPanelProps>(({ routes = [] }, ref) => {
   const [route, setRoute] = useState<MapPayload | null>(null)
   const [activeRouteIndex, setActiveRouteIndex] = useState(-1)
   const [amap, setAmap] = useState<AMapState>({ stage: 'idle' })
+  const [mapNotice, setMapNotice] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const amapRef = useRef<any>(null)
   const mapInstanceRef = useRef<any>(null)
+  const mapContainerRef = useRef<HTMLElement | null>(null)
+  const baseLayerRef = useRef<any>(null)
   const overlayRef = useRef<any[]>([])
 
   // ---- 命令式 API ----
@@ -96,7 +105,7 @@ const MapPanel = forwardRef<MapPanelHandle, MapPanelProps>(({ routes = [] }, ref
       setAmap({ stage: 'error', reason: 'no-key' })
       return
     }
-    if (typeof window !== 'undefined' && window.AMap) {
+    if (amapRef.current) {
       setAmap({ stage: 'ready' })
       return
     }
@@ -105,14 +114,12 @@ const MapPanel = forwardRef<MapPanelHandle, MapPanelProps>(({ routes = [] }, ref
       if (AMAP_SECURITY_CODE) {
         window._AMapSecurityConfig = { securityJsCode: AMAP_SECURITY_CODE }
       }
-      await injectScript(
-        `https://webapi.amap.com/maps?v=${AMAP_VERSION}&key=${encodeURIComponent(AMAP_JS_KEY)}&plugin=${AMAP_PLUGINS}`,
-      )
-      if (typeof window !== 'undefined' && window.AMap) {
-        setAmap({ stage: 'ready' })
-      } else {
-        setAmap({ stage: 'error', reason: 'script-missing' })
-      }
+      amapRef.current = await AMapLoader.load({
+        key: AMAP_JS_KEY,
+        version: AMAP_VERSION,
+        plugins: AMAP_PLUGINS.split(','),
+      })
+      setAmap({ stage: 'ready' })
     } catch (err) {
       setAmap({ stage: 'error', reason: (err as Error).message || 'load-failed' })
     }
@@ -128,19 +135,55 @@ const MapPanel = forwardRef<MapPanelHandle, MapPanelProps>(({ routes = [] }, ref
   // ---- 真实高德地图渲染 ----
   useEffect(() => {
     if (amap.stage !== 'ready') return
-    if (!containerRef.current || !route) return
-    const AMap = window.AMap
+    const container = containerRef.current
+    if (!container || !route) return
+    const AMap = amapRef.current || window.AMap
     if (!AMap) return
+    if (!hasLayoutSize(container)) {
+      const timer = window.setTimeout(() => setRoute((current) => (current ? { ...current } : current)), 40)
+      return () => window.clearTimeout(timer)
+    }
+
+    if (mapInstanceRef.current && mapContainerRef.current !== container) {
+      mapInstanceRef.current.destroy?.()
+      mapInstanceRef.current = null
+      baseLayerRef.current = null
+      overlayRef.current = []
+    }
 
     if (!mapInstanceRef.current) {
-      mapInstanceRef.current = new AMap.Map(containerRef.current, {
+      baseLayerRef.current = AMap.createDefaultLayer({
+        zooms: [3, 20],
+        zIndex: 1,
+        opacity: 1,
+        visible: true,
+      })
+      mapInstanceRef.current = new AMap.Map(container, {
         zoom: 11,
         viewMode: '2D',
-        // Claude 风格：暖色为主的地图样式 ID（高德通用样式）
-        mapStyle: 'amap://styles/whitesmoke',
+        layers: baseLayerRef.current ? [baseLayerRef.current] : undefined,
+        mapStyle: MAP_STYLE,
+        features: MAP_FEATURES,
+      })
+      mapContainerRef.current = container
+      mapInstanceRef.current.on?.('complete', () => setMapNotice(null))
+      mapInstanceRef.current.on?.('error', (event: unknown) => {
+        console.error('[MapPanel] AMap map error', event)
+        setMapNotice('高德底图资源加载失败，请检查 Web(JS API) Key、安全密钥和 Referer 白名单。')
       })
     }
     const map = mapInstanceRef.current
+    map.setMapStyle?.(MAP_STYLE)
+    map.setFeatures?.(MAP_FEATURES)
+    if (baseLayerRef.current) {
+      baseLayerRef.current.show?.()
+      map.setLayers?.([baseLayerRef.current])
+    }
+    debugAmapLayerState(container, map, baseLayerRef.current)
+    const noticeTimer = window.setTimeout(() => {
+      if (hasVisibleBaseTexture(container)) return
+      setMapNotice('路线已绘制，但底图纹理没有加载成功。通常是高德 Key / 安全密钥 / Referer 白名单或网络拦截导致。')
+    }, 3500)
     const routeColor = activeRouteIndex < 0 ? OVERVIEW_COLOR : ROUTE_COLORS[activeRouteIndex % ROUTE_COLORS.length]
 
     // 清掉上一次的覆盖物
@@ -175,14 +218,39 @@ const MapPanel = forwardRef<MapPanelHandle, MapPanelProps>(({ routes = [] }, ref
       overlayRef.current.push(polyline)
     }
 
-    if (route.bounds) {
-      const sw = new AMap.LngLat(route.bounds.sw[0], route.bounds.sw[1])
-      const ne = new AMap.LngLat(route.bounds.ne[0], route.bounds.ne[1])
-      map.setBounds(new AMap.Bounds(sw, ne), false, [60, 60, 60, 60])
-    } else if (markers.length > 0) {
-      map.setFitView(markers, false, [60, 60, 60, 60])
+    fitRouteView(map, AMap, route, markers)
+    const timers = [0, 80, 240].map((delay) =>
+      window.setTimeout(() => fitRouteView(map, AMap, route, markers), delay),
+    )
+    return () => {
+      window.clearTimeout(noticeTimer)
+      timers.forEach((timer) => window.clearTimeout(timer))
     }
   }, [amap.stage, route, activeRouteIndex])
+
+  useEffect(() => {
+    if (route || !mapInstanceRef.current) return
+    mapInstanceRef.current.destroy?.()
+    mapInstanceRef.current = null
+    baseLayerRef.current = null
+    mapContainerRef.current = null
+    overlayRef.current = []
+  }, [route])
+
+  useEffect(() => {
+    if (amap.stage !== 'ready' || !mapInstanceRef.current) return
+    const resize = () => {
+      mapInstanceRef.current?.resize?.()
+      if (route) fitRouteView(mapInstanceRef.current, window.AMap, route, overlayRef.current)
+    }
+    const observer = containerRef.current ? new ResizeObserver(() => requestAnimationFrame(resize)) : null
+    if (containerRef.current && observer) observer.observe(containerRef.current)
+    window.addEventListener('resize', resize)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', resize)
+    }
+  }, [amap.stage, route])
 
   // ---- 渲染 ----
   return (
@@ -263,10 +331,17 @@ const MapPanel = forwardRef<MapPanelHandle, MapPanelProps>(({ routes = [] }, ref
         )}
 
         {route && amap.stage === 'ready' && (
-          <div ref={containerRef} className="absolute inset-0" />
+          <>
+            <div ref={containerRef} className="amap-container absolute inset-0 h-full w-full" />
+            {mapNotice && (
+              <div className="absolute left-3 right-3 top-3 z-20 rounded-2xl border border-amber-200 bg-paper/95 px-3 py-2 text-xs leading-5 text-ink shadow-quiet backdrop-blur">
+                {mapNotice}
+              </div>
+            )}
+          </>
         )}
 
-        {route && amap.stage === 'error' && <FallbackSvg route={route} reason={amap.reason} color={activeRouteIndex < 0 ? OVERVIEW_COLOR : ROUTE_COLORS[activeRouteIndex % ROUTE_COLORS.length]} />}
+        {route && amap.stage === 'error' && <FallbackSvg route={route} reason={normalizeAmapError(amap.reason)} color={activeRouteIndex < 0 ? OVERVIEW_COLOR : ROUTE_COLORS[activeRouteIndex % ROUTE_COLORS.length]} />}
       </div>
 
       {/* Panel Footer — 路线摘要 */}
@@ -342,6 +417,13 @@ function FallbackSvg({ route, reason, color }: { route: MapPayload; reason: stri
   const projY = (lat: number) => H - PADDING - ((lat - minLat) / spanLat) * (H - PADDING * 2) // y 反向
 
   const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${projX(p[0]).toFixed(1)} ${projY(p[1]).toFixed(1)}`).join(' ')
+  const guideRoads = [
+    `M 18 76 C 96 42, 154 104, 226 66 S 318 72, 348 42`,
+    `M 28 252 C 86 214, 136 238, 190 196 S 276 168, 344 194`,
+    `M 72 18 C 90 82, 74 142, 112 190 S 156 254, 144 308`,
+    `M 250 24 C 232 92, 286 134, 260 202 S 272 276, 324 316`,
+  ]
+  const placeLabels = route.markers.slice(0, 6)
 
   return (
     <div className="absolute inset-0 flex flex-col items-stretch overflow-hidden">
@@ -353,9 +435,36 @@ function FallbackSvg({ route, reason, color }: { route: MapPayload; reason: stri
       </div>
       <div className="flex flex-1 items-center justify-center">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-[420px]">
-          {/* 背景纸张纹理 */}
           <rect x="0" y="0" width={W} height={H} fill="#FCFBF8" />
-          <path d={pathD} fill="none" stroke={color} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" opacity={0.72} />
+          <defs>
+            <pattern id="map-grid" width="32" height="32" patternUnits="userSpaceOnUse">
+              <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#E7E0D5" strokeWidth="0.8" opacity="0.55" />
+            </pattern>
+          </defs>
+          <rect x="0" y="0" width={W} height={H} fill="url(#map-grid)" />
+          {guideRoads.map((road, index) => (
+            <path
+              key={index}
+              d={road}
+              fill="none"
+              stroke={index % 2 ? '#DCCAB8' : '#D4DDD0'}
+              strokeWidth={index % 2 ? 7 : 9}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.55}
+            />
+          ))}
+          {placeLabels.map((m, index) => {
+            const px = 24 + ((index * 67) % 300)
+            const py = 42 + ((index * 49) % 230)
+            return (
+              <text key={`${m.order}-label`} x={px} y={py} fontSize={10} fill="#9A8D7E" opacity={0.72}>
+                {m.name}
+              </text>
+            )
+          })}
+          <path d={pathD} fill="none" stroke="#FCFBF8" strokeWidth={9} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
+          <path d={pathD} fill="none" stroke={color} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" opacity={0.82} />
           {route.markers.map((m) => {
             const cx = projX(m.lng)
             const cy = projY(m.lat)
@@ -439,33 +548,107 @@ function computeBounds(points: Array<[number, number]>): MapPayload['bounds'] {
   }
 }
 
+function hasLayoutSize(el: HTMLElement) {
+  return el.clientWidth > 0 && el.clientHeight > 0
+}
+
+function fitRouteView(map: any, AMap: any, route: MapPayload, overlays: any[]) {
+  if (!map || !AMap) return
+  map.resize?.()
+  if (route.bounds) {
+    const sw = new AMap.LngLat(route.bounds.sw[0], route.bounds.sw[1])
+    const ne = new AMap.LngLat(route.bounds.ne[0], route.bounds.ne[1])
+    map.setBounds(new AMap.Bounds(sw, ne), false, MAP_PADDING)
+    return
+  }
+  const markers = overlays.filter((overlay) => typeof overlay?.getPosition === 'function')
+  if (markers.length > 0) {
+    map.setFitView(markers, false, MAP_PADDING)
+  }
+}
+
+function debugAmapLayerState(container: HTMLElement, map: any, baseLayer: any) {
+  if (!import.meta.env.DEV) return
+  window.setTimeout(() => {
+    const rect = container.getBoundingClientRect()
+    const canvasCount = container.querySelectorAll('canvas').length
+    const imageCount = container.querySelectorAll('img').length
+    const layerClasses = Array.from(container.querySelectorAll('[class*="amap"]'))
+      .slice(0, 12)
+      .map((el) => (el as HTMLElement).className)
+    console.info('[MapPanel] AMap layer state', {
+      rect: { width: rect.width, height: rect.height },
+      zoom: map.getZoom?.(),
+      center: map.getCenter?.()?.toString?.(),
+      features: MAP_FEATURES,
+      baseLayer: Boolean(baseLayer),
+      canvasCount,
+      imageCount,
+      layerClasses,
+    })
+  }, 800)
+}
+
+function hasVisibleBaseTexture(container: HTMLElement) {
+  const canvas = Array.from(container.querySelectorAll('canvas')).find((item) => {
+    const rect = item.getBoundingClientRect()
+    return rect.width > 64 && rect.height > 64
+  })
+  if (canvas && hasPaintedCanvas(canvas)) return true
+  return Array.from(container.querySelectorAll('img')).some((img) => {
+    const rect = img.getBoundingClientRect()
+    const src = img.currentSrc || img.src
+    return rect.width > 32 && rect.height > 32 && img.complete && img.naturalWidth > 0 && /amap|autonavi/i.test(src)
+  })
+}
+
+function hasPaintedCanvas(canvas: HTMLCanvasElement) {
+  if (canvas.width === 0 || canvas.height === 0) return false
+  const sampleX = Math.floor(canvas.width / 2)
+  const sampleY = Math.floor(canvas.height / 2)
+  const twoDimensional = read2dCanvasPixel(canvas, sampleX, sampleY)
+  if (twoDimensional) return true
+  return readWebglCanvasPixel(canvas, sampleX, sampleY)
+}
+
+function read2dCanvasPixel(canvas: HTMLCanvasElement, x: number, y: number) {
+  try {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return false
+    const data = ctx.getImageData(x, y, 1, 1).data
+    return data[3] !== 0
+  } catch {
+    return false
+  }
+}
+
+function readWebglCanvasPixel(canvas: HTMLCanvasElement, x: number, y: number) {
+  const contexts = ['webgl2', 'webgl', 'experimental-webgl'] as const
+  for (const name of contexts) {
+    try {
+      const gl = canvas.getContext(name, { preserveDrawingBuffer: true }) as WebGLRenderingContext | WebGL2RenderingContext | null
+      if (!gl) continue
+      const pixel = new Uint8Array(4)
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel)
+      if (pixel[3] !== 0) return true
+    } catch {
+      // AMap owns the WebGL context; keep trying the remaining context names.
+    }
+  }
+  return false
+}
+
+function normalizeAmapError(reason: string) {
+  if (!reason) return '高德地图脚本加载失败，使用草图模式'
+  if (reason === 'no-key') return reason
+  if (/security|jscode|key|invalid|permission|forbidden|unauthorized|403|401/i.test(reason)) {
+    return `高德地图鉴权失败：${reason}`
+  }
+  return reason
+}
+
 function sumNullable(values: Array<number | null | undefined>) {
   const nums = values.filter((value): value is number => typeof value === 'number')
   if (nums.length === 0) return null
   return Number(nums.reduce((sum, value) => sum + value, 0).toFixed(2))
-}
-
-function injectScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src="${src}"]`) as HTMLScriptElement | null
-    if (existing) {
-      if (existing.dataset.loaded === 'true') {
-        resolve()
-        return
-      }
-      existing.addEventListener('load', () => resolve())
-      existing.addEventListener('error', () => reject(new Error('script load failed')))
-      return
-    }
-    const el = document.createElement('script')
-    el.src = src
-    el.async = true
-    el.dataset.loaded = 'false'
-    el.addEventListener('load', () => {
-      el.dataset.loaded = 'true'
-      resolve()
-    })
-    el.addEventListener('error', () => reject(new Error('script load failed')))
-    document.head.appendChild(el)
-  })
 }

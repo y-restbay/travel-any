@@ -5,7 +5,8 @@
  *   答案正文里的 [n] 点击后由 App.tsx 滚动并高亮对应卡。
  * - status=failed/empty 时给一行降级提示,不渲染卡片。
  */
-import { ExternalLink, Globe } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { ChevronDown, ExternalLink, Globe } from 'lucide-react'
 import type { WebSourceBundle } from '../types'
 
 function hostOf(url: string): string {
@@ -23,6 +24,20 @@ export default function SourcesPanel({
   messageId: string
   bundle: WebSourceBundle
 }) {
+  // 来源列表默认折叠,用户点标题栏才展开。
+  const [expanded, setExpanded] = useState(false)
+
+  // 正文里的 [n] 角标被点击时,scrollToCitation 派发此事件,
+  // 命中本条消息则自动展开,保证引用能跳转到对应来源卡。
+  useEffect(() => {
+    function onJump(e: Event) {
+      const detail = (e as CustomEvent<{ messageId: string }>).detail
+      if (detail?.messageId === messageId) setExpanded(true)
+    }
+    window.addEventListener('wb-cite-jump', onJump)
+    return () => window.removeEventListener('wb-cite-jump', onJump)
+  }, [messageId])
+
   if (bundle.status !== 'success' || bundle.sources.length === 0) {
     return (
       <div className="mt-3 flex items-center gap-2 rounded-2xl border border-line/60 bg-canvas/40 px-3 py-2 text-[11px] text-muted">
@@ -36,12 +51,24 @@ export default function SourcesPanel({
 
   return (
     <section className="mt-3 overflow-hidden rounded-2xl border border-line/60 bg-paper/70">
-      <div className="flex items-center gap-2 border-b border-line/50 px-3 py-2 text-[12px] font-medium text-ink">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className={`flex w-full items-center gap-2 px-3 py-2 text-[12px] font-medium text-ink transition-colors hover:bg-canvas/40 ${
+          expanded ? 'border-b border-line/50' : ''
+        }`}
+      >
         <Globe size={13} className="text-clayDeep" />
         联网来源 · {bundle.sources.length} 条
-      </div>
-      <ol className="divide-y divide-line/40">
-        {bundle.sources.map((s) => (
+        <ChevronDown
+          size={14}
+          className={`ml-auto shrink-0 text-muted transition-transform ${expanded ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {expanded && (
+        <ol className="divide-y divide-line/40">
+          {bundle.sources.map((s) => (
           <li
             key={s.n}
             id={`wb-src-${messageId}-${s.n}`}
@@ -82,7 +109,8 @@ export default function SourcesPanel({
             </div>
           </li>
         ))}
-      </ol>
+        </ol>
+      )}
     </section>
   )
 }

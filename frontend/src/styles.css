@@ -139,6 +139,11 @@ input {
   background-clip: content-box;
 }
 
+.amap-container {
+  height: 100%;
+  width: 100%;
+}
+
 @keyframes avatar-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }

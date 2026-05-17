@@ -64,6 +64,7 @@ export type ThinkingStep = {
   args?: Record<string, unknown>  // action 参数
   tool_call_id?: string
   summary?: string    // observation 摘要
+  detail?: string     // observation 详情(如真实天气数据),供面板展开显示
   step?: number
 }
 

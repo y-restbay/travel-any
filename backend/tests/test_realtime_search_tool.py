@@ -81,5 +81,9 @@ def test_tool_schema_and_registrations():
     manual_tools = build_langchain_tools([_ToolRecord()], event_sink=[])
     assert [tool.name for tool in manual_tools] == ["search_realtime_travel_info"]
 
-    generic_names = {tool.name for tool in build_generic_tools()}
-    assert "search_realtime_travel_info" in generic_names
+    # 联网搜索工具按设计默认不下发，仅在开关开启时进入 supervisor 工具集。
+    default_names = {tool.name for tool in build_generic_tools()}
+    assert "search_realtime_travel_info" not in default_names
+
+    enabled_names = {tool.name for tool in build_generic_tools(include_web_search=True)}
+    assert "search_realtime_travel_info" in enabled_names

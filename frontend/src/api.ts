@@ -386,7 +386,9 @@ export async function debugRag(query: string, top_k = 5): Promise<RAGDebugResult
 
 type ChatStreamCallbacks = {
   onDelta: (content: string) => void
+  onError?: (message: string) => void
   onMeta?: (payload: unknown) => void
+  onStatus?: (payload: { detail?: string }) => void
   onMapData?: (payload: MapPayload) => void
   onItinerary?: (payload: Itinerary) => void
   onExport?: (payload: ExportInfo) => void
@@ -396,7 +398,7 @@ type ChatStreamCallbacks = {
   onThinkingStart?: () => void
   onThought?: (text: string, step: number) => void
   onAction?: (payload: { tool: string; args: Record<string, unknown>; tool_call_id: string; step: number }) => void
-  onObservation?: (payload: { tool: string; summary: string; tool_call_id: string }) => void
+  onObservation?: (payload: { tool: string; summary: string; detail?: string; tool_call_id: string }) => void
   onThinkingEnd?: (payload: { duration_ms: number; steps: number; summary: string }) => void
   onAnswerChunk?: (text: string) => void
   onWebSources?: (payload: WebSourceBundle) => void
@@ -465,11 +467,16 @@ export async function streamChat(
       if (!event || !dataLine) continue
 
       const payload = JSON.parse(dataLine)
+      if (event === 'status') callbacks.onStatus?.(payload as { detail?: string })
+      if (event === 'error') {
+        callbacks.onError?.(String(payload.message ?? '回答生成失败，请稍后重试'))
+        return
+      }
       if (event === 'delta') callbacks.onDelta(payload.content ?? '')
       if (event === 'answer_chunk') callbacks.onAnswerChunk?.(payload.text ?? '')
       if (event === 'thought') callbacks.onThought?.(payload.text ?? '', payload.step ?? 0)
       if (event === 'action') callbacks.onAction?.(payload as { tool: string; args: Record<string, unknown>; tool_call_id: string; step: number })
-      if (event === 'observation') callbacks.onObservation?.(payload as { tool: string; summary: string; tool_call_id: string })
+      if (event === 'observation') callbacks.onObservation?.(payload as { tool: string; summary: string; detail?: string; tool_call_id: string })
       if (event === 'thinking_start') callbacks.onThinkingStart?.()
       if (event === 'thinking_end') callbacks.onThinkingEnd?.(payload as { duration_ms: number; steps: number; summary: string })
       if (event === 'meta') {
@@ -519,6 +526,11 @@ export async function resumeChat(
       const dataLine = lines.find((line) => line.startsWith('data: '))?.slice(6)
       if (!event || !dataLine) continue
       const payload = JSON.parse(dataLine)
+      if (event === 'status') callbacks.onStatus?.(payload as { detail?: string })
+      if (event === 'error') {
+        callbacks.onError?.(String(payload.message ?? '回答生成失败，请稍后重试'))
+        return
+      }
       if (event === 'delta') callbacks.onDelta(payload.content ?? '')
       if (event === 'meta') callbacks.onMeta?.(payload)
       if (event === 'map_data') callbacks.onMapData?.(payload as MapPayload)

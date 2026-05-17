@@ -29,35 +29,36 @@ EXPORT_DIR = _BACKEND_DIR / "storage" / "exports"
 FONT_PATH = _BACKEND_DIR / "assets" / "fonts" / "SourceHanSansCN-Regular.otf"
 
 _PDF_FONT_NAME = "SourceHan"
-_PDF_FONT_REGISTERED: Optional[bool] = None  # None=未尝试, True=注册成功, False=失败已 fallback
+_CID_FONT_NAME = "STSong-Light"  # reportlab 内置 CJK 字体,无需外部字体文件
+_PDF_RESOLVED_FONT: Optional[str] = None  # 缓存最终可用字体名;None=未尝试
 
 
 def _ensure_pdf_font_registered() -> str:
-    """惰性注册思源黑体。返回最终可用的字体名(Helvetica 是 fallback)。"""
-    global _PDF_FONT_REGISTERED
-    if _PDF_FONT_REGISTERED is True:
-        return _PDF_FONT_NAME
-    if _PDF_FONT_REGISTERED is False:
-        return "Helvetica"
+    """惰性注册 PDF 中文字体,返回最终可用的字体名。
+
+    优先用 assets 下的思源黑体(放了字体文件排版更好看);文件缺失或
+    注册失败时,回退到 reportlab 内置 CJK 字体 STSong-Light——它无需
+    任何外部文件即可正确渲染中文,避免中文变黑方块。
+    """
+    global _PDF_RESOLVED_FONT
+    if _PDF_RESOLVED_FONT is not None:
+        return _PDF_RESOLVED_FONT
 
     from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.pdfbase.ttfonts import TTFont
 
     if FONT_PATH.exists():
         try:
             pdfmetrics.registerFont(TTFont(_PDF_FONT_NAME, str(FONT_PATH)))
-            _PDF_FONT_REGISTERED = True
-            return _PDF_FONT_NAME
+            _PDF_RESOLVED_FONT = _PDF_FONT_NAME
+            return _PDF_RESOLVED_FONT
         except Exception as exc:
-            logger.warning("注册思源黑体失败,退化为 Helvetica:%s", exc)
-            _PDF_FONT_REGISTERED = False
-            return "Helvetica"
-    logger.warning(
-        "未找到中文字体 %s,PDF 中文将变方块。请把 SourceHanSansCN-Regular.otf 放到该路径。",
-        FONT_PATH,
-    )
-    _PDF_FONT_REGISTERED = False
-    return "Helvetica"
+            logger.warning("注册思源黑体失败,回退内置 %s:%s", _CID_FONT_NAME, exc)
+
+    pdfmetrics.registerFont(UnicodeCIDFont(_CID_FONT_NAME))
+    _PDF_RESOLVED_FONT = _CID_FONT_NAME
+    return _PDF_RESOLVED_FONT
 
 
 # --------------------------------------------------------------------- Tool Schema

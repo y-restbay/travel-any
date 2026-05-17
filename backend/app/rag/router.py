@@ -16,13 +16,9 @@ CONCEPT_PATTERNS = re.compile(r"(体验|感觉|适合|推荐|如何|为什么|�
 
 class QueryAnalyzer:
     def analyze(self, query: str, llm_config: Optional[LLMConfig] = None) -> QueryAnalysis:
-        if llm_config is not None and not uses_mock_provider(llm_config):
-            llm_result = self._analyze_with_llm(query, llm_config)
-            if llm_result is not None:
-                return llm_result
-            fallback = self._analyze_with_rules(query)
-            fallback.decision_source = "rules_fallback"
-            return fallback
+        # 聊天首 token 慢的一个主要原因是:每轮正式回答前先额外调用一次
+        # LLM 做 RAG 路由分类。这里改成规则路由,把慢调用留给真正回答。
+        # _analyze_with_llm 保留给后续离线调试/评估使用。
         return self._analyze_with_rules(query)
 
     def _analyze_with_rules(self, query: str) -> QueryAnalysis:

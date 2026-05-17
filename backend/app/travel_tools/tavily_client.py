@@ -25,12 +25,13 @@ class TavilySearchClient:
         query: str,
         time_range: str = "week",
         max_results: int = 5,
-        search_depth: str = "basic",
+        search_depth: str = "advanced",
         include_answer: bool = True,
         include_raw_content: bool = False,
     ) -> dict:
         """
         调用 Tavily 搜索。
+        - search_depth="advanced": 更深的检索 + 更好的正文抽取与相关性排序(质量明显优于 basic)
         - include_answer=True: 返回 AI 总结的简短答案(省 token)
         - include_raw_content=False: 不返回全文,只要 snippet
         """

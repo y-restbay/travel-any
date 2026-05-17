@@ -55,7 +55,12 @@ const intro: ChatMessage = {
     '你好，我是 **WanderBot 漫游指南**。告诉我目的地、天数、预算、同行人群和喜欢的节奏，我会帮你把旅行计划整理成清晰、舒服、可执行的版本。',
 }
 
-const suggestions = ['带父母去京都 5 天，节奏慢一点', '第一次去冰岛，预算中等，想看自然风景', '上海出发，周末两天想找一个安静海边']
+const suggestions = [
+  '西安兵马俑 + 华清宫 2 天游，帮我用地图把景点、交通和顺路餐馆串起来',
+  '黄山 3 天游，想看天气、缆车、徒步路线和下山后的返程安排',
+  '成都到九寨沟 4 天游，帮我规划自驾路线、住宿停靠点和每日行程',
+  '北京故宫、颐和园、什刹海 5 天游，按天拆分成一份很详细的旅行方案，帮我选好其他的目的地，再查查天气和交通，再生成每天的景点顺序、地图动线、午餐晚餐建议、预算和注意事项，最后把可执行版本完整输出并在系统的地图显示出来。',
+]
 
 type SpeechRecognitionCtor = new () => SpeechRecognitionLike
 type SpeechRecognitionLike = {
@@ -133,6 +138,9 @@ export default function App() {
     setActiveId(id)
     setMessages(next)
     setInput('')
+    setDeepThinking(false)
+    setWebSearch(false)
+    setKnowledgeSource('local')
     mapPanelRef.current?.clear()
     setLatestMapPayloads([])
     setMapVisible(false)
@@ -288,7 +296,7 @@ export default function App() {
     resumeChat(
       threadId,
       decision,
-      buildStreamCallbacks(messageId, setMessages, conversationIdRef),
+      buildStreamCallbacks(messageId, setMessages, conversationIdRef, setLatestMapPayloads),
     )
       .catch(() => {
         setMessages((current) =>
@@ -327,12 +335,12 @@ export default function App() {
       id: assistantId,
       role: 'assistant',
       content: '',
-      thinkingTrace: createPendingTrace(knowledgeSource),
+      thinkingTrace: deepThinking || knowledgeSource === 'cloud' ? createPendingTrace(knowledgeSource) : undefined,
     }
     if (deepThinking && knowledgeSource !== 'cloud') {
       assistantMessage.thinkingSteps = []
     }
-    const baseMessages = dropTrailingDuplicateUserMessage(messages, content)
+    const baseMessages = dropTransientAssistantStatus(dropTrailingDuplicateUserMessage(messages, content))
     const nextMessages = [...baseMessages, userMessage, assistantMessage]
 
     setMessages(nextMessages)
@@ -346,7 +354,7 @@ export default function App() {
           .filter((message) => message.id !== 'intro')
           .filter((message) => message.content.trim().length > 0)
           .map(({ role, content }) => ({ role, content })),
-        buildStreamCallbacks(assistantId, setMessages, conversationIdRef),
+        buildStreamCallbacks(assistantId, setMessages, conversationIdRef, setLatestMapPayloads),
         undefined,
         undefined,
         undefined,
@@ -649,15 +657,15 @@ export default function App() {
         {/* ===== Right Map Panel：由工具调用按需出现 ===== */}
         {mapVisible && (
           <aside
-            className="group relative hidden h-full shrink-0 overflow-hidden border-l border-line/60 bg-paper/35 backdrop-blur-sm transition-[width] duration-150 ease-out md:block"
-            style={{ width: mapWidth }}
+            className="group fixed inset-0 z-50 h-[100dvh] w-screen overflow-hidden bg-paper shadow-soft md:relative md:inset-auto md:z-auto md:h-full md:w-auto md:shrink-0 md:border-l md:border-line/60 md:bg-paper/35 md:backdrop-blur-sm md:transition-[width] md:duration-150 md:ease-out"
+            style={{ width: typeof window !== 'undefined' && window.innerWidth >= 768 ? mapWidth : undefined }}
             aria-label="路线地图"
           >
             <button
               type="button"
               onPointerDown={handleMapResizeStart}
               onPointerMove={handleMapResizeMove}
-              className="absolute left-0 top-0 z-20 grid h-full w-4 -translate-x-1/2 cursor-col-resize place-items-center text-muted/45 outline-none transition hover:text-clayDeep focus-visible:text-clayDeep"
+              className="absolute left-0 top-0 z-20 hidden h-full w-4 -translate-x-1/2 cursor-col-resize place-items-center text-muted/45 outline-none transition hover:text-clayDeep focus-visible:text-clayDeep md:grid"
               title="拖动调整聊天与地图宽度"
               aria-label="拖动调整聊天与地图宽度"
             >
@@ -716,10 +724,14 @@ function MessageBubble({
 }) {
   const isUser = message.role === 'user'
   const parsedContent = isUser ? { answer: message.content, reasoning: '' } : splitReasoningContent(message.content)
+  const displayAnswer = !isUser && !message.thinkingSteps ? stripSingleAgentProcessText(parsedContent.answer) : parsedContent.answer
   const displayTrace =
     !isUser && parsedContent.reasoning
       ? appendReasoningTextStep(message.thinkingTrace, parsedContent.reasoning)
       : message.thinkingTrace
+  // 工具返回的卡片（网页/来源/行程/导出/地图入口）在流式输出期间会遮挡正文，
+  // 推迟到本条消息流式结束后再渲染；数据本身仍照常在流式中写入 message。
+  const showToolCards = !isUser && !parentIsStreaming
 
   return (
     <motion.article
@@ -761,10 +773,10 @@ function MessageBubble({
         {!isUser && displayTrace && !message.thinkingSteps && (
           <ThinkingPanel trace={displayTrace} forceOpen={showThinkingDetails} />
         )}
-        {!isUser && message.thinkingSteps && (
+        {!isUser && message.thinkingSteps && (parentIsStreaming || message.thinkingSteps.length > 0) && (
           <ReactThinkingBlock steps={message.thinkingSteps} isStreaming={parentIsStreaming} />
         )}
-        {!isUser &&
+        {showToolCards &&
           message.webSources &&
           message.webSources.status === 'success' &&
           message.webSources.sources.length > 0 && (
@@ -778,19 +790,19 @@ function MessageBubble({
             className="markdown-body"
             components={citationMarkdownComponents(message.id)}
           >
-            {withCitationLinks(parsedContent.answer || ' ', Boolean(message.webSources?.sources.length))}
+            {withCitationLinks(displayAnswer || ' ', Boolean(message.webSources?.sources.length))}
           </ReactMarkdown>
         )}
-        {!isUser && getMessageMapRoutes(message).length > 0 && (
+        {showToolCards && getMessageMapRoutes(message).length > 0 && (
           <MapRevealButton payloads={getMessageMapRoutes(message)} onShowMap={onShowMap} />
         )}
-        {!isUser && message.itinerary && (
+        {showToolCards && message.itinerary && (
           <ItineraryCard itinerary={message.itinerary} />
         )}
-        {!isUser && message.exports && message.exports.length > 0 && (
+        {showToolCards && message.exports && message.exports.length > 0 && (
           <ExportLinks exports={message.exports} />
         )}
-        {!isUser && message.webSources && (
+        {showToolCards && message.webSources && (
           <SourcesPanel messageId={message.id} bundle={message.webSources} />
         )}
         {!isUser && message.pendingInterrupt && (
@@ -853,12 +865,16 @@ function withCitationLinks(text: string, hasSources: boolean): string {
 }
 
 function scrollToCitation(messageId: string, n: string) {
-  const el = document.getElementById(`wb-src-${messageId}-${n}`)
-  if (!el) return
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  el.classList.remove('wb-cite-flash')
-  void el.offsetWidth // 触发重排以重启动画
-  el.classList.add('wb-cite-flash')
+  // 来源面板默认折叠:先请求展开,等卡片渲染出来(下一宏任务)再滚动高亮。
+  window.dispatchEvent(new CustomEvent('wb-cite-jump', { detail: { messageId } }))
+  setTimeout(() => {
+    const el = document.getElementById(`wb-src-${messageId}-${n}`)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.remove('wb-cite-flash')
+    void el.offsetWidth // 触发重排以重启动画
+    el.classList.add('wb-cite-flash')
+  }, 0)
 }
 
 function citationMarkdownComponents(messageId: string): Components {
@@ -987,11 +1003,7 @@ function getMessageMapRoutes(message: ChatMessage): MapPayload[] {
 }
 
 function appendMapRouteToMessage(message: ChatMessage, route: MapPayload): ChatMessage {
-  const routes = getMessageMapRoutes(message)
-  const routeKey = getMapRouteKey(route)
-  const nextRoutes = routes.some((item) => getMapRouteKey(item) === routeKey)
-    ? routes.map((item) => (getMapRouteKey(item) === routeKey ? route : item))
-    : [...routes, route]
+  const nextRoutes = upsertMapRoute(getMessageMapRoutes(message), route)
 
   return {
     ...message,
@@ -1003,6 +1015,13 @@ function appendMapRouteToMessage(message: ChatMessage, route: MapPayload): ChatM
       route.markers.length,
     ),
   }
+}
+
+function upsertMapRoute(routes: MapPayload[], route: MapPayload): MapPayload[] {
+  const routeKey = getMapRouteKey(route)
+  return routes.some((item) => getMapRouteKey(item) === routeKey)
+    ? routes.map((item) => (getMapRouteKey(item) === routeKey ? route : item))
+    : [...routes, route]
 }
 
 function getMapRouteKey(route: MapPayload) {
@@ -1017,17 +1036,41 @@ function dropTrailingDuplicateUserMessage(messages: ChatMessage[], content: stri
   return messages
 }
 
+function dropTransientAssistantStatus(messages: ChatMessage[]) {
+  const cleaned = [...messages]
+  while (cleaned.length > 0) {
+    const last = cleaned[cleaned.length - 1]
+    if (
+      last.role === 'assistant' &&
+      last.content.includes('已收到问题，正在连接模型') &&
+      !last.itinerary &&
+      !last.mapPayload &&
+      !last.mapPayloads?.length &&
+      !last.exports?.length &&
+      !last.webSources &&
+      !last.pendingInterrupt &&
+      !(last.thinkingSteps?.length)
+    ) {
+      cleaned.pop()
+      continue
+    }
+    break
+  }
+  return cleaned
+}
+
 function buildStreamCallbacks(
   assistantId: string,
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
   conversationIdRef: React.MutableRefObject<string | null>,
+  setLatestMapPayloads?: React.Dispatch<React.SetStateAction<MapPayload[]>>,
 ) {
   return {
     onDelta: (delta: string) => {
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId
-            ? { ...message, content: stripToolMarkup(message.content + delta) }
+            ? { ...message, content: stripToolMarkup(message.content + delta, false) }
             : message,
         ),
       )
@@ -1036,8 +1079,39 @@ function buildStreamCallbacks(
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId
-            ? { ...message, content: stripToolMarkup(message.content + text) }
+            ? { ...message, content: stripToolMarkup(message.content + text, false) }
             : message,
+        ),
+      )
+    },
+    onStatus: (payload: { detail?: string }) => {
+      const detail = payload.detail?.trim()
+      if (!detail) return
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== assistantId) return message
+          if (message.thinkingSteps) {
+            const steps = message.thinkingSteps.length
+              ? message.thinkingSteps
+              : [{ type: 'thought' as const, text: detail, step: 0 }]
+            return { ...message, thinkingSteps: steps }
+          }
+          return message
+        }),
+      )
+    },
+    onError: (message: string) => {
+      const visibleMessage = message.replace(/^深度思考出错:\s*/u, '').trim()
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === assistantId
+            ? {
+                ...item,
+                content:
+                  item.content.trim() ||
+                  `抱歉，这次回答在生成过程中中断了。\n\n${visibleMessage || '请稍后重试。'}`,
+              }
+            : item,
         ),
       )
     },
@@ -1080,7 +1154,7 @@ function buildStreamCallbacks(
         }),
       )
     },
-    onObservation: (payload: { tool: string; summary: string; tool_call_id: string }) => {
+    onObservation: (payload: { tool: string; summary: string; detail?: string; tool_call_id: string }) => {
       setMessages((current) =>
         current.map((message) => {
           if (message.id !== assistantId) return message
@@ -1089,6 +1163,7 @@ function buildStreamCallbacks(
             type: 'observation',
             tool: payload.tool,
             summary: payload.summary,
+            detail: payload.detail,
             tool_call_id: payload.tool_call_id,
           })
           return { ...message, thinkingSteps: steps }
@@ -1122,6 +1197,7 @@ function buildStreamCallbacks(
           message.id === assistantId ? appendMapRouteToMessage(message, mapPayload) : message,
         ),
       )
+      setLatestMapPayloads?.((current) => upsertMapRoute(current, mapPayload))
     },
     onItinerary: (itinerary: Itinerary) => {
       setMessages((current) =>
@@ -1302,7 +1378,14 @@ function ReactStepItem({ step, isLast, isStreaming }: { step: ThinkingStep; isLa
     return (
       <div className="flex gap-2 rounded-2xl px-2 py-1.5">
         <span className="mt-0.5 shrink-0 text-sm" aria-label="工具结果">📊</span>
-        <p className="text-xs leading-6 text-muted">{step.summary || '已获取结果'}</p>
+        <div className="min-w-0">
+          <p className="whitespace-pre-wrap text-xs leading-6 text-muted">{step.summary || '已获取结果'}</p>
+          {step.detail && (
+            <pre className="mt-1 whitespace-pre-wrap rounded-2xl bg-paper/80 px-2.5 py-1.5 text-[11px] leading-5 text-ink soft-scrollbar">
+              {step.detail}
+            </pre>
+          )}
+        </div>
       </div>
     )
   }
@@ -1314,6 +1397,8 @@ function ThinkingPanel({ trace, forceOpen }: { trace: ThinkingTrace; forceOpen: 
   const [expanded, setExpanded] = useState(forceOpen)
   const doneCount = trace.steps.filter((step) => step.status === 'done').length
   const activeStep = trace.steps.find((step) => step.status === 'active')
+  const isDeepTrace = trace.runtime === 'react' || trace.steps.some((step) => step.id.startsWith('tool-'))
+  const title = isDeepTrace ? '深度思考' : '检索过程'
 
   useEffect(() => {
     setExpanded(forceOpen)
@@ -1331,7 +1416,7 @@ function ThinkingPanel({ trace, forceOpen }: { trace: ThinkingTrace; forceOpen: 
           <BrainCircuit size={16} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[13px] font-medium text-ink">思考过程</span>
+          <span className="block text-[13px] font-medium text-ink">{title}</span>
           <span className="block truncate text-xs text-muted">
             {trace.summary || activeStep?.detail || `已完成 ${doneCount}/${trace.steps.length} 个步骤`}
           </span>
@@ -1671,9 +1756,9 @@ const DSML_TOOL_MARKUP_RE =
 const DSML_PARTIAL_MARKUP_RE =
   /<\s*\|\s*\|\s*DSML[\s\S]*$|&lt;\s*\|\s*\|\s*DSML[\s\S]*$|<\s*｜\s*｜\s*DSML[\s\S]*$/i
 
-function stripToolMarkup(text: string) {
+function stripToolMarkup(text: string, trim = true) {
   if (!text) return text
-  return text
+  const cleaned = text
     .replace(DSML_TOOL_MARKUP_RE, '')
     .replace(DSML_PARTIAL_MARKUP_RE, '')
     .replace(
@@ -1685,6 +1770,16 @@ function stripToolMarkup(text: string) {
       '',
     )
     .replace(/�/g, '')
+  return trim ? cleaned.trim() : cleaned
+}
+
+function stripSingleAgentProcessText(text: string) {
+  if (!text) return text
+  return text
+    .replace(/(?:第[一二三四五六七八九十]+轮|第一轮|第二轮|第三轮|第四轮|第五轮)[^。！？\n]{0,40}[。！？\n]?/g, '')
+    .replace(/(?:我先|先查|接下来|然后我会|我会先|我先把|我先查)[^。！？\n]{0,80}[。！？\n]?/g, '')
+    .replace(/(?:正在|准备|开始|继续)[^。！？\n]{0,30}[。！？\n]?/g, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
 

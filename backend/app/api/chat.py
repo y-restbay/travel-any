@@ -1,8 +1,8 @@
 import json
 import logging
 import time
-import uuid
-from typing import AsyncIterator, Optional
+import asyncio
+from typing import AsyncIterator, Optional, Set
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -19,6 +19,7 @@ from app.services.chat_service import (
 from app.services.config_service import get_active_llm_config, get_active_system_prompt
 from app.services.llm_factory import uses_mock_provider
 from app.services.tool_service import get_active_tools
+from app.services.web_search_context import WEB_SEARCH_OFF_BLOCK
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -36,6 +37,8 @@ def _last_user_text(messages) -> str:
 async def _logged_stream(gen: AsyncIterator[str], question: str) -> AsyncIterator[str]:
     """包装 SSE 生成器:记录提问 / 回答完成 / 回答异常,工具报错由全局 handler 自动捕获。"""
     t0 = time.time()
+    yield "event: status\ndata: {\"detail\":\"已收到问题，正在连接模型...\"}\n\n"
+    await asyncio.sleep(0)
     try:
         async for event in gen:
             yield event
@@ -63,9 +66,59 @@ _SSE_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
-# 仅自定义的 Tavily 实时搜索工具受联网搜索开关管控:关闭时不下发给模型。
-# firecrawl 的 web_search / web_scrape、天气/路线等领域 API 与本地工具均不受影响，始终可用。
-_WEB_SEARCH_TOOL_TYPES = {"tavily_realtime_search"}
+# 联网搜索工具统一受「联网搜索」开关管控:关闭时不下发给模型。
+_WEB_SEARCH_TOOL_TYPES = {"tavily_realtime_search", "firecrawl_search", "firecrawl_scrape"}
+
+
+_WEATHER_INTENT_WORDS = (
+    "天气", "气温", "温度", "下雨", "降雨", "降雪", "预报", "穿衣", "紫外线", "台风", "风力",
+)
+_DIRECTIONS_INTENT_WORDS = (
+    "地图", "路线", "动线", "导航", "怎么走", "交通", "驾车", "自驾", "步行", "打车",
+    "通勤", "路程", "距离", "显示出来",
+)
+_ITINERARY_CARD_INTENT_WORDS = (
+    "生成卡片", "行程卡片", "显示卡片", "可视化行程", "结构化行程", "系统卡片", "卡片展示",
+)
+_EXPORT_INTENT_WORDS = (
+    "导出", "下载", "保存成", "生成pdf", "生成 pdf", "pdf", "word", "文档",
+)
+_SEARCH_INTENT_WORDS = (
+    "联网", "搜索", "查最新", "实时", "最新", "官网", "新闻", "营业时间", "票价", "门票",
+)
+
+
+def _has_any(text: str, words: tuple[str, ...]) -> bool:
+    return any(word in text for word in words)
+
+
+def _single_mode_requested_tool_types(question: str, *, web_search: bool) -> Set[str]:
+    """普通模式只响应用户显式要求的工具能力。
+
+    ReAct 深度思考模式可以由模型自主选择工具；普通模式为了避免泄漏工具过程、
+    避免“单 Agent 自己规划工具”，必须先由入口层根据用户最后一句收窄工具集合。
+    """
+    text = (question or "").lower()
+    requested: Set[str] = set()
+
+    if web_search:
+        requested.update({"tavily_realtime_search", "firecrawl_search", "firecrawl_scrape"})
+    if _has_any(text, _WEATHER_INTENT_WORDS):
+        requested.add("qweather_weather")
+    if _has_any(text, _DIRECTIONS_INTENT_WORDS):
+        requested.add("amap_directions")
+    if _has_any(text, _ITINERARY_CARD_INTENT_WORDS):
+        requested.add("itinerary_summary")
+    if _has_any(text, _EXPORT_INTENT_WORDS):
+        requested.update({"itinerary_export", "itinerary_summary"})
+
+    return requested
+
+
+def _filter_tools_by_type(tools, allowed_types: Set[str]):
+    if not allowed_types:
+        return []
+    return [tool for tool in tools if tool.tool_type in allowed_types]
 
 
 @router.post("/stream")
@@ -75,7 +128,7 @@ async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db))
 
     active_tools = get_active_tools(db)
     mode = (payload.mode or "single").strip().lower()
-    runtime = (llm_config.runtime or "tools").lower().strip()
+    question = _last_user_text(payload.messages)
 
     knowledge_source = (payload.knowledge_source or "local").strip().lower()
     is_mock = uses_mock_provider(llm_config)
@@ -88,6 +141,9 @@ async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db))
         if web_search
         else [t for t in active_tools if t.tool_type not in _WEB_SEARCH_TOOL_TYPES]
     )
+    user_wants_web_search = _has_any(question.lower(), _SEARCH_INTENT_WORDS)
+    single_mode_tool_types = _single_mode_requested_tool_types(question, web_search=web_search)
+    single_mode_tools = _filter_tools_by_type(effective_tools, single_mode_tool_types)
 
     if knowledge_source == "cloud":
         from app.services.bailian_app_service import bailian_app_chat_stream
@@ -100,24 +156,27 @@ async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db))
             payload.messages, llm_config, system_prompt, effective_tools, knowledge_source,
             web_search, web_search_api_key,
         )
-    elif runtime == "supervisor" and not is_mock and not web_search:
-        # 联网搜索时绕过 supervisor，走已支持注入的 tools 路径。
-        thread_id = payload.conversation_id or uuid.uuid4().hex
-        stream = chat_stream_with_supervisor(
-            payload.messages, llm_config, system_prompt, thread_id=thread_id, knowledge_source=knowledge_source
-        )
-    elif (active_tools or web_search) and not is_mock:
+    elif single_mode_tools and not is_mock:
+        # 普通模式只在用户明确要求某类工具能力时进入工具链，并且只下发对应工具。
+        # 模型自主决定“下一步该调什么工具”的能力保留给 ReAct 深度思考模式。
         stream = chat_stream_with_tools(
-            payload.messages, llm_config, system_prompt, effective_tools, knowledge_source,
+            payload.messages, llm_config, system_prompt, single_mode_tools, knowledge_source,
             web_search, web_search_api_key,
         )
     else:
-        stream = chat_stream(payload.messages, llm_config, system_prompt, knowledge_source)
+        # 没有可用工具时才走纯对话真 token 流式 SSE。
+        stream = chat_stream(
+            payload.messages,
+            llm_config,
+            system_prompt,
+            knowledge_source,
+            WEB_SEARCH_OFF_BLOCK if user_wants_web_search and not web_search else "",
+        )
 
-    question = _last_user_text(payload.messages)
     logger.info(
-        "提问 | mode=%s ks=%s web=%s | %s",
-        mode, knowledge_source, web_search, question,
+        "提问 | mode=%s ks=%s web=%s tools=%s | %s",
+        mode, knowledge_source, web_search, ",".join(sorted(single_mode_tool_types)) or "-",
+        question,
     )
     return StreamingResponse(
         _logged_stream(stream, question),

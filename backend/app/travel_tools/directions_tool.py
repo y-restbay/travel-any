@@ -142,13 +142,21 @@ async def handle_get_directions(
 
     distance_km = round(distance_m / 1000.0, 2) if distance_m else 0.0
     duration_min = int(round(duration_s / 60.0)) if duration_s else 0
+    route_path = _route_path_from_markers(markers)
+    route_path_text = " → ".join(route_path)
+    distance_text = f"{distance_km:g} km" if distance_km else "距离未知"
+    duration_text = f"{duration_min} 分钟" if duration_min else "时长未知"
 
     summary: Dict[str, Any] = {
         "mode": mode,
         "route_name": route_name or "推荐路线",
         "stops": len(markers),
+        "route_path": route_path,
+        "route_path_text": route_path_text,
         "distance_km": distance_km,
+        "distance_text": distance_text,
         "duration_min": duration_min,
+        "duration_text": duration_text,
         "tolls_yuan": tolls,
         "is_mock": bool(isinstance(raw, dict) and raw.get("_mock")),
         "tip": "路线地图已准备好，请在回复中简短提示用户点击回答下方按钮查看",
@@ -165,6 +173,7 @@ async def handle_get_directions(
             "distance_km": distance_km,
             "duration_min": duration_min,
             "cost_yuan": tolls,
+            "route_path": route_path,
         },
     }
 
@@ -270,6 +279,19 @@ def _build_markers(
 
 def _markers_to_xy(markers: List[Dict[str, Any]]) -> List[Tuple[int, float, float]]:
     return [(m["order"], m["lng"], m["lat"]) for m in markers]
+
+
+def _route_path_from_markers(markers: List[Dict[str, Any]]) -> List[str]:
+    """提取给 LLM / 思考面板展示的站点顺序,压掉连续重复名称。"""
+    path: List[str] = []
+    for marker in sorted(markers, key=lambda item: item.get("order", 0)):
+        name = str(marker.get("name") or "").strip()
+        if not name:
+            continue
+        if path and path[-1] == name:
+            continue
+        path.append(name)
+    return path
 
 
 def _compute_bounds(points: List[List[float]]) -> Optional[Dict[str, List[float]]]:
