@@ -1,0 +1,12 @@
+services:
+  frontend:
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      FRONTEND_SERVER_NAME: ${FRONTEND_SERVER_NAME:-www.restbay-aitravel.com}
+      BACKEND_ORIGIN: http://api:6688
+      BACKEND_HOST: api:6688
+    volumes:
+      - ./ops/nginx/https.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./ops/certs:/etc/nginx/certs:ro

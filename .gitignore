@@ -11,6 +11,8 @@ __pycache__/
 *.db
 .firecrawl/
 storage/
+ops/certs/*
+!ops/certs/.gitkeep
 application-prod.yml
 .DS_Store
 *.zip
