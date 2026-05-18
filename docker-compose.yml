@@ -3,6 +3,8 @@ services:
     build:
       context: ./backend
     container_name: travel-any-api
+    env_file:
+      - ./backend/.env
     ports:
       - "6688:6688"
     environment:
