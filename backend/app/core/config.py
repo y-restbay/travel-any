@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     app_name: str = "WanderBot API"
     api_prefix: str = "/api"
     admin_username: str = Field(default="admin")
-    admin_password: str = Field(default="admin123")
+    admin_password: str = Field(default="adminyhb")
     admin_token_secret: Optional[str] = Field(default=None)
     database_url: str = Field(
         default=f"sqlite:///{Path(__file__).resolve().parents[3] / 'wanderbot.db'}"

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+import { Children, FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
@@ -880,6 +880,18 @@ function scrollToCitation(messageId: string, n: string) {
 
 function citationMarkdownComponents(messageId: string): Components {
   return {
+    p({ children }) {
+      return <p>{highlightAssistantText(children)}</p>
+    },
+    li({ children }) {
+      return <li>{highlightAssistantText(children)}</li>
+    },
+    td({ children }) {
+      return <td>{highlightAssistantText(children)}</td>
+    },
+    th({ children }) {
+      return <th>{highlightAssistantText(children)}</th>
+    },
     a({ href, children, ...props }) {
       const h = typeof href === 'string' ? href : ''
       if (h.startsWith('wb-cite:')) {
@@ -904,6 +916,47 @@ function citationMarkdownComponents(messageId: string): Components {
       )
     },
   }
+}
+
+function highlightAssistantText(children: ReactNode): ReactNode {
+  return Children.map(children, (child) => {
+    if (typeof child === 'string') return highlightKeyText(child)
+    return child
+  })
+}
+
+function highlightKeyText(text: string): ReactNode {
+  const tokens = splitKeyText(text)
+  if (tokens.length === 1 && !tokens[0].highlight) return text
+  return tokens.map((token, index) =>
+    token.highlight ? (
+      <span key={`${token.text}-${index}`} className="wb-keymark">
+        {token.text}
+      </span>
+    ) : (
+      token.text
+    ),
+  )
+}
+
+function splitKeyText(text: string): Array<{ text: string; highlight: boolean }> {
+  const keyPattern =
+    /((?:¥|￥)?\d+(?:\.\d+)?\s*(?:[-–—~至到]\s*(?:¥|￥)?\d+(?:\.\d+)?)\s*(?:元|万元|km|公里|米|分钟|小时|天|晚|次|个地点|个停靠点|条|人|℃|°C|%|级)|(?:¥|￥)?\d+(?:\.\d+)?\s?(?:元|万元|km|公里|米|分钟|小时|天|晚|次|个地点|个停靠点|条|人|℃|°C|%|级)|(?:\d{1,2}:\d{2})|(?:\d{1,2}\s?[月]\s?\d{1,2}\s?(?:日|号)?)|(?:上午|下午|晚上|中午|早上)?\s?\d{1,2}\s?点(?:\d{1,2}\s?分)?|(?:预算|费用|门票|交通|住宿|餐饮|时间|距离|用时|天气|温度|开放时间|注意|建议|路线|地点|方案|结论|风险|推荐|重点)(?=[:：]))/gi
+  const parts: Array<{ text: string; highlight: boolean }> = []
+  let lastIndex = 0
+  for (const match of text.matchAll(keyPattern)) {
+    const value = match[0]
+    const index = match.index ?? 0
+    if (index > lastIndex) {
+      parts.push({ text: text.slice(lastIndex, index), highlight: false })
+    }
+    parts.push({ text: value, highlight: true })
+    lastIndex = index + value.length
+  }
+  if (lastIndex < text.length) {
+    parts.push({ text: text.slice(lastIndex), highlight: false })
+  }
+  return parts
 }
 
 // 思考过程里的「联网检索」块:两种模式都展示网页 URL（满足硬性要求）。
@@ -1398,8 +1451,7 @@ function ThinkingPanel({ trace, forceOpen }: { trace: ThinkingTrace; forceOpen: 
   const [expanded, setExpanded] = useState(forceOpen)
   const doneCount = trace.steps.filter((step) => step.status === 'done').length
   const activeStep = trace.steps.find((step) => step.status === 'active')
-  const isDeepTrace = trace.runtime === 'react' || trace.steps.some((step) => step.id.startsWith('tool-'))
-  const title = isDeepTrace ? '深度思考' : '检索过程'
+  const title = getTracePanelTitle(trace)
 
   useEffect(() => {
     setExpanded(forceOpen)
@@ -1444,6 +1496,13 @@ function ThinkingPanel({ trace, forceOpen }: { trace: ThinkingTrace; forceOpen: 
       )}
     </div>
   )
+}
+
+function getTracePanelTitle(trace: ThinkingTrace) {
+  if (trace.runtime === 'react' && trace.steps.some((step) => step.id === 'reasoning-text')) return '深度思考'
+  if (trace.runtime === 'bailian_app') return '云端检索'
+  if (trace.steps.some((step) => step.id.startsWith('tool-'))) return '任务进度'
+  return '检索过程'
 }
 
 function TraceStepItem({ step }: { step: ThinkingTraceStep }) {

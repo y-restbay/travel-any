@@ -27,7 +27,7 @@ const AMAP_VERSION = '2.0'
 const AMAP_PLUGINS = 'AMap.Polyline,AMap.Marker'
 const OVERVIEW_COLOR = '#2F2A25'
 const ROUTE_COLORS = ['#B98D68', '#65735D', '#5876A6', '#A86F7A', '#7D6CA8', '#B59B48']
-const MAP_STYLE = 'amap://styles/normal'
+const MAP_STYLE = 'amap://styles/whitesmoke'
 const MAP_FEATURES = ['bg', 'road', 'point', 'building']
 
 export type MapPanelHandle = {

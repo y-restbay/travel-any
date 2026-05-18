@@ -295,7 +295,6 @@ function AdminLogin({ onLogin }: { onLogin: () => void }) {
                 type="password"
                 autoComplete="current-password"
                 className="w-full rounded-3xl border border-line bg-[#F8F6F1] px-4 py-3 text-sm outline-none transition focus:border-clayDeep/40 focus:bg-paper"
-                placeholder="admin123"
               />
             </label>
 

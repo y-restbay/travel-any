@@ -128,6 +128,15 @@ input {
   font-size: 0.9em;
 }
 
+.markdown-body .wb-keymark {
+  color: #C15F3C;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: rgba(193, 95, 60, 0.24);
+  text-decoration-thickness: 0.12em;
+  text-underline-offset: 0.18em;
+}
+
 .soft-scrollbar::-webkit-scrollbar {
   width: 10px;
 }
