@@ -16,9 +16,9 @@ import { SoftButton } from './shared'
 
 const grafanaBaseUrl =
   import.meta.env.VITE_GRAFANA_DASHBOARD_URL ??
-  'http://localhost:3000/d/travel-any-overview/travel-any-observability?orgId=1&refresh=10s&theme=light&kiosk=tv'
+  `${window.location.origin}/grafana/d/travel-any-overview/travel-any-observability?orgId=1&refresh=10s&theme=light&kiosk=tv`
 
-const prometheusUrl = import.meta.env.VITE_PROMETHEUS_URL ?? 'http://localhost:9090'
+const prometheusUrl = import.meta.env.VITE_PROMETHEUS_URL ?? `${window.location.origin}/prometheus`
 
 type PanelCard = {
   id: number
@@ -113,15 +113,17 @@ const opsTableRows = [
 
 function buildPanelUrl(panelId: number) {
   const url = new URL(grafanaBaseUrl)
-  const uid = url.pathname.split('/')[2] ?? 'travel-any-overview'
-  const slug = url.pathname.split('/')[3] ?? 'travel-any-observability'
+  const normalizedPath = url.pathname.replace(/^\/grafana(?=\/)/, '')
+  const parts = normalizedPath.split('/')
+  const uid = parts[2] ?? 'travel-any-overview'
+  const slug = parts[3] ?? 'travel-any-observability'
   const from = url.searchParams.get('from') ?? 'now-30m'
   const to = url.searchParams.get('to') ?? 'now'
   const refresh = url.searchParams.get('refresh') ?? '10s'
   const theme = url.searchParams.get('theme') ?? 'light'
   const orgId = url.searchParams.get('orgId') ?? '1'
 
-  return `${url.origin}/d-solo/${uid}/${slug}?orgId=${orgId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&refresh=${encodeURIComponent(refresh)}&theme=${encodeURIComponent(theme)}&panelId=${panelId}&kiosk=tv`
+  return `${url.origin}/grafana/d-solo/${uid}/${slug}?orgId=${orgId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&refresh=${encodeURIComponent(refresh)}&theme=${encodeURIComponent(theme)}&panelId=${panelId}&kiosk=tv`
 }
 
 export default function MonitorModule() {

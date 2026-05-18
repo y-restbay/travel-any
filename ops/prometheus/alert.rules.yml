@@ -1,0 +1,60 @@
+# Travel-Any 告警规则
+#
+# 指标来源：
+#   - http_*               由 prometheus-fastapi-instrumentator 自动埋点
+#   - wanderbot_llm_*       backend/app/services/metrics_service.py 自定义埋点
+#   - up                    Prometheus 对每个 scrape target 的内建可用性指标
+#
+# status 标签沿用 prometheus-fastapi-instrumentator 默认分组（2xx / 5xx 等），
+# 正则 "5.." 同时匹配 "5xx" 与 "500"。
+
+groups:
+  - name: travel-any-availability
+    rules:
+      - alert: ApiInstanceDown
+        expr: up{job="travel-any-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端 API 不可达"
+          description: "Prometheus 已连续 1 分钟无法抓取 travel-any-api /metrics，服务可能宕机。"
+
+      - alert: HighHttp5xxRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 5xx 占比偏高"
+          description: "近 5 分钟 5xx 占比 {{ $value | humanizePercentage }} 已持续 5 分钟，超过 5% 阈值。"
+
+  - name: travel-any-latency
+    rules:
+      - alert: HighApiLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "接口 p95 延迟过高"
+          description: "全局 p95 延迟 {{ printf \"%.2f\" $value }}s 已持续 10 分钟，超过 5s 阈值。"
+
+      - alert: SlowLLMResponseP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, runtime) (rate(wanderbot_llm_request_duration_seconds_bucket[10m]))
+          ) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "大模型响应 p95 过慢（runtime={{ $labels.runtime }}）"
+          description: "runtime={{ $labels.runtime }} 的 LLM 调用 p95 已 {{ printf \"%.0f\" $value }}s，持续 10 分钟，超过 60s 阈值。"
