@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------- 路径与字体
 _BACKEND_DIR = Path(__file__).resolve().parents[2]  # .../backend
-EXPORT_DIR = _BACKEND_DIR / "storage" / "exports"
+EXPORT_DIR = Path(os.getenv("EXPORT_DIR") or (_BACKEND_DIR / "storage" / "exports"))
 FONT_PATH = _BACKEND_DIR / "assets" / "fonts" / "SourceHanSansCN-Regular.otf"
 
 _PDF_FONT_NAME = "SourceHan"

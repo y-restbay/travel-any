@@ -10,3 +10,16 @@ services:
     volumes:
       - ./ops/nginx/https.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./ops/certs:/etc/nginx/certs:ro
+
+  grafana:
+    environment:
+      GF_SERVER_DOMAIN: ${FRONTEND_SERVER_NAME:-www.restbay-aitravel.com}
+      GF_SERVER_ROOT_URL: https://${FRONTEND_SERVER_NAME:-www.restbay-aitravel.com}/grafana/
+
+  prometheus:
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.external-url=https://${FRONTEND_SERVER_NAME:-www.restbay-aitravel.com}/prometheus/"
+      - "--web.route-prefix=/"
+      - "--web.enable-lifecycle"

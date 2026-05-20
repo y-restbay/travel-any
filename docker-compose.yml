@@ -11,6 +11,7 @@ services:
       DATABASE_URL: sqlite:////data/wanderbot.db
       RAG_CHROMA_PATH: /data/storage/chroma
       RAG_BM25_PATH: /data/storage/bm25_index.json
+      EXPORT_DIR: /data/storage/exports
     volumes:
       - api-data:/data
     healthcheck:
@@ -48,6 +49,8 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+      - "--web.external-url=${PROMETHEUS_EXTERNAL_URL:-http://localhost/prometheus/}"
+      - "--web.route-prefix=/"
       - "--web.enable-lifecycle"
     ports:
       - "9090:9090"
@@ -83,6 +86,7 @@ services:
     expose:
       - "3000"
     environment:
+      GF_SERVER_DOMAIN: ${FRONTEND_SERVER_NAME:-localhost}
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_SECURITY_ALLOW_EMBEDDING: "true"

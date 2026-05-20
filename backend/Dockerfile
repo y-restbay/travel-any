@@ -11,7 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_TRUSTED_HOST=mirrors.aliyun.com \
     DATABASE_URL=sqlite:////data/wanderbot.db \
     RAG_CHROMA_PATH=/data/storage/chroma \
-    RAG_BM25_PATH=/data/storage/bm25_index.json
+    RAG_BM25_PATH=/data/storage/bm25_index.json \
+    EXPORT_DIR=/data/storage/exports
 
 WORKDIR /app
 
@@ -23,7 +24,7 @@ RUN adduser \
         --no-create-home \
         --uid 10001 \
         appuser \
-    && mkdir -p /data/storage \
+    && mkdir -p /data/storage/exports \
     && chown -R appuser:appuser /data
 
 COPY requirements.txt .

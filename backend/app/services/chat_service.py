@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -476,7 +477,7 @@ async def test_llm_connection(provider: str, model_name: str, api_key: str, base
 
 def _firecrawl_search_tool(tool_config: dict) -> Any:
     """Create a Firecrawl search LangChain tool."""
-    api_key = tool_config.get("api_key", "")
+    api_key = tool_config.get("api_key") or os.getenv("FIRECRAWL_API_KEY", "")
 
     @langchain_tool
     def web_search(query: str) -> str:
@@ -502,7 +503,7 @@ def _firecrawl_search_tool(tool_config: dict) -> Any:
 
 def _firecrawl_scrape_tool(tool_config: dict) -> Any:
     """Create a Firecrawl scrape LangChain tool."""
-    api_key = tool_config.get("api_key", "")
+    api_key = tool_config.get("api_key") or os.getenv("FIRECRAWL_API_KEY", "")
 
     @langchain_tool
     def web_scrape(url: str) -> str:
