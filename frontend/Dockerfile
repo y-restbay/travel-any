@@ -31,4 +31,4 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
+    CMD sh -c "wget --no-check-certificate -qO- https://127.0.0.1/ >/dev/null || exit 1"
