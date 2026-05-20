@@ -45,3 +45,29 @@ def run_lightweight_migrations(engine: Engine) -> None:
                 connection.execute(
                     text("ALTER TABLE llm_configs ADD COLUMN runtime VARCHAR(20) NOT NULL DEFAULT 'tools'")
                 )
+
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS vlm_configs (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        provider VARCHAR(80) DEFAULT 'dashscope' NOT NULL,
+                        model_name VARCHAR(160) DEFAULT 'qwen-vl-max' NOT NULL,
+                        api_key TEXT DEFAULT '' NOT NULL,
+                        base_url VARCHAR(500) DEFAULT 'https://dashscope.aliyuncs.com/compatible-mode/v1' NOT NULL,
+                        is_active BOOLEAN DEFAULT 1 NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_vlm_configs_id ON vlm_configs (id)")
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_vlm_configs_provider ON vlm_configs (provider)")
+            )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_vlm_configs_is_active ON vlm_configs (is_active)")
+            )

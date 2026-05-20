@@ -8,7 +8,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # override=False 保证已经手动 export 的变量优先。
 load_dotenv(override=False)
 
-from app.api import admin, chat, exports, health, rag
+from app.api import admin, chat, exports, health, rag, uploads
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.migrations import run_lightweight_migrations
@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(rag.router, prefix=settings.api_prefix)
     app.include_router(chat.router, prefix=settings.api_prefix)
     app.include_router(exports.router, prefix=settings.api_prefix)
+    app.include_router(uploads.router, prefix=settings.api_prefix)
 
     Instrumentator(
         excluded_handlers=["/metrics"],

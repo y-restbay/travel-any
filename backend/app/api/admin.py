@@ -28,9 +28,14 @@ from app.schemas.config import (
     TestEmbeddingResponse,
     TestLLMRequest,
     TestLLMResponse,
+    TestVLMRequest,
+    TestVLMResponse,
     ToolCreate,
     ToolRead,
     ToolUpdate,
+    VLMConfigCreate,
+    VLMConfigRead,
+    VLMConfigUpdate,
 )
 from app.services import config_service, tool_service
 from app.services.chat_service import test_llm_connection
@@ -151,6 +156,95 @@ def update_llm_config(
 def delete_llm_config(config_id: int, _: str = Depends(require_admin), db: Session = Depends(get_db)) -> None:
     if not config_service.delete_llm_config(db, config_id):
         raise HTTPException(status_code=404, detail="LLM config not found")
+
+
+# ---- VLM (图片识别多模态模型) ----
+
+
+@router.get("/config/vlm", response_model=list[VLMConfigRead])
+def list_vlm_configs(
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[VLMConfigRead]:
+    return config_service.list_vlm_configs(db)
+
+
+@router.post("/config/vlm", response_model=VLMConfigRead, status_code=status.HTTP_201_CREATED)
+def create_vlm_config(
+    payload: VLMConfigCreate,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> VLMConfigRead:
+    return config_service.create_vlm_config(db, payload)
+
+
+@router.patch("/config/vlm/{config_id}", response_model=VLMConfigRead)
+def update_vlm_config(
+    config_id: int,
+    payload: VLMConfigUpdate,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> VLMConfigRead:
+    config = config_service.update_vlm_config(db, config_id, payload)
+    if config is None:
+        raise HTTPException(status_code=404, detail="VLM config not found")
+    return config
+
+
+@router.delete("/config/vlm/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vlm_config(
+    config_id: int,
+    _: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    if not config_service.delete_vlm_config(db, config_id):
+        raise HTTPException(status_code=404, detail="VLM config not found")
+
+
+@router.post("/config/vlm/test", response_model=TestVLMResponse)
+async def test_vlm_config(
+    payload: TestVLMRequest,
+    _: str = Depends(require_admin),
+) -> TestVLMResponse:
+    """轻量连通性测试:用 1x1 像素图调一次 VLM,看能不能拿到非空回复。"""
+    import base64
+    import time
+
+    from app.travel_tools.vlm_client import VLMClient
+
+    client = VLMClient(
+        api_key=payload.api_key,
+        base_url=payload.base_url,
+        model=payload.model_name,
+    )
+    if not client.is_ready():
+        return TestVLMResponse(success=False, message="未提供 API Key,也未配置 DASHSCOPE_API_KEY")
+
+    # 1x1 透明 PNG,Base64 解码后约 70 字节,足够触发一次 VLM 调用
+    tiny_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII="
+    )
+    start = time.time()
+    try:
+        result = await client.recognize(
+            tiny_png,
+            prompt="只回复 'ok' 两个字符,不要其他内容。",
+            mime="image/png",
+        )
+        latency = int((time.time() - start) * 1000)
+        snippet = (result or "").strip().replace("\n", " ")[:80]
+        return TestVLMResponse(
+            success=True,
+            latency_ms=latency,
+            message=f"连接成功（{latency}ms），返回: {snippet or '(空)'}",
+        )
+    except Exception as exc:
+        latency = int((time.time() - start) * 1000)
+        return TestVLMResponse(
+            success=False,
+            latency_ms=latency,
+            message=f"连接失败（{latency}ms）: {exc.__class__.__name__}: {exc}",
+        )
 
 
 @router.get("/config/embeddings", response_model=list[EmbeddingConfigRead])

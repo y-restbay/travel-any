@@ -164,4 +164,16 @@ TOOL_PRESETS: List[Dict[str, Any]] = [
         "tool_type": "itinerary_export",
         "config": {},
     },
+    {
+        "name": "identify_landmark",
+        "label": "Identify Landmark (VLM)",
+        "description": (
+            "识别用户上传图片中的景点或地标，内部调用国内多模态大模型（默认 qwen-vl-max）。"
+            "当用户消息携带 image_ref 时主动调用，拿到景点名称后可继续调用 "
+            "search_realtime_travel_info / get_weather / get_directions 编排完整回答。"
+            "VLM 配置在管理后台「图片识别模型」单独管理；留空时回退到环境变量 DASHSCOPE_API_KEY。"
+        ),
+        "tool_type": "landmark_identify",
+        "config": {"model": "", "base_url": "", "api_key": ""},
+    },
 ]

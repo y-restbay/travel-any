@@ -29,6 +29,7 @@ from app.services.chat_service import (
     _message_content_to_text,
     _rag_meta,
     _retrieve_for_messages,
+    _user_content_with_image_ref,
     build_langchain_tools,
     sse_event,
     strip_tool_markup,
@@ -457,7 +458,7 @@ def _build_lc_messages(
         if m.role == "system":
             lc_messages.append(SystemMessage(content=m.content))
         elif m.role == "user":
-            lc_messages.append(HumanMessage(content=m.content))
+            lc_messages.append(HumanMessage(content=_user_content_with_image_ref(m)))
         elif m.role == "assistant":
             lc_messages.append(AIMessage(content=m.content))
     return lc_messages

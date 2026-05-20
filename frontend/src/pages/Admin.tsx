@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Activity, Binary, ChevronLeft, ChevronRight, Database, FileText, LockKeyhole, LogOut, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, SearchCheck, Server, ShieldCheck } from 'lucide-react'
+import { Activity, Binary, Camera, ChevronLeft, ChevronRight, Database, FileText, LockKeyhole, LogOut, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, SearchCheck, Server, ShieldCheck } from 'lucide-react'
 import EmbeddingConfigModule from './admin/EmbeddingConfigModule'
 import KnowledgeBaseModule from './admin/KnowledgeBaseModule'
 import LLMConfigModule from './admin/LLMConfigModule'
@@ -9,9 +9,10 @@ import SystemPromptModule from './admin/SystemPromptModule'
 import ToolsModule from './admin/ToolsModule'
 import MonitorModule from './admin/MonitorModule'
 import LogsModule from './admin/LogsModule'
+import VLMConfigModule from './admin/VLMConfigModule'
 import { clearAdminToken, getAdminToken, loginAdmin } from '../api'
 
-type AdminModule = 'llm' | 'embedding' | 'prompt' | 'knowledge' | 'rag' | 'tools' | 'logs' | 'monitor'
+type AdminModule = 'llm' | 'vlm' | 'embedding' | 'prompt' | 'knowledge' | 'rag' | 'tools' | 'logs' | 'monitor'
 const ADMIN_SIDEBAR_STORAGE_KEY = 'wanderbot:admin-sidebar-collapsed'
 const ADMIN_AUTH_STORAGE_KEY = 'wanderbot:admin-authenticated'
 
@@ -22,6 +23,7 @@ const modules: Array<{
   icon: typeof Server
 }> = [
   { key: 'llm', label: '大模型配置', desc: 'Provider, key, base URL', icon: Server },
+  { key: 'vlm', label: '图片识别模型', desc: 'VLM provider / 模型 / Key', icon: Camera },
   { key: 'embedding', label: '向量模型配置', desc: 'Embedding provider 和 key', icon: Binary },
   { key: 'prompt', label: 'System Prompt', desc: '角色、边界、文件范围', icon: FileText },
   { key: 'knowledge', label: '知识库文件', desc: '上传、切片、入库', icon: Database },
@@ -207,6 +209,7 @@ export default function Admin() {
           </motion.div>
 
           {activeModule === 'llm' && <LLMConfigModule />}
+          {activeModule === 'vlm' && <VLMConfigModule />}
           {activeModule === 'embedding' && <EmbeddingConfigModule />}
           {activeModule === 'prompt' && <SystemPromptModule />}
           {activeModule === 'knowledge' && <KnowledgeBaseModule />}

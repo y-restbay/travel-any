@@ -55,6 +55,29 @@ class EmbeddingConfig(Base):
     )
 
 
+class VLMConfig(Base):
+    """图片识别（多模态）模型配置。与文本调度模型分开管理。
+
+    api_key 留空时,VLM 客户端会回退到环境变量 DASHSCOPE_API_KEY,
+    避免重复配置同一把密钥。
+    """
+
+    __tablename__ = "vlm_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    provider: Mapped[str] = mapped_column(String(80), default="dashscope", index=True)
+    model_name: Mapped[str] = mapped_column(String(160), default="qwen-vl-max")
+    api_key: Mapped[str] = mapped_column(Text, default="")
+    base_url: Mapped[str] = mapped_column(
+        String(500), default="https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SystemPrompt(Base):
     __tablename__ = "system_prompts"
 

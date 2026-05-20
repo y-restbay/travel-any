@@ -94,7 +94,12 @@ def _has_any(text: str, words: tuple[str, ...]) -> bool:
     return any(word in text for word in words)
 
 
-def _single_mode_requested_tool_types(question: str, *, web_search: bool) -> Set[str]:
+def _single_mode_requested_tool_types(
+    question: str,
+    *,
+    web_search: bool,
+    has_image: bool = False,
+) -> Set[str]:
     """普通模式只响应用户显式要求的工具能力。
 
     ReAct 深度思考模式可以由模型自主选择工具；普通模式为了避免泄漏工具过程、
@@ -113,6 +118,17 @@ def _single_mode_requested_tool_types(question: str, *, web_search: bool) -> Set
         requested.add("itinerary_summary")
     if _has_any(text, _EXPORT_INTENT_WORDS):
         requested.update({"itinerary_export", "itinerary_summary"})
+    if has_image:
+        # 看图识景点是多步流程:识别后通常还要查介绍/天气/路线,
+        # 这里直接放开补充工具,让 LLM 自行编排,避免拆问。
+        requested.update(
+            {
+                "landmark_identify",
+                "tavily_realtime_search",
+                "qweather_weather",
+                "amap_directions",
+            }
+        )
 
     return requested
 
@@ -144,7 +160,15 @@ async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db))
         else [t for t in active_tools if t.tool_type not in _WEB_SEARCH_TOOL_TYPES]
     )
     user_wants_web_search = _has_any(question.lower(), _SEARCH_INTENT_WORDS)
-    single_mode_tool_types = _single_mode_requested_tool_types(question, web_search=web_search)
+    has_image_in_messages = any(
+        getattr(message, "image_ref", None) or getattr(message, "image_refs", None)
+        for message in payload.messages
+    )
+    single_mode_tool_types = _single_mode_requested_tool_types(
+        question,
+        web_search=web_search,
+        has_image=has_image_in_messages,
+    )
     single_mode_tools = _filter_tools_by_type(effective_tools, single_mode_tool_types)
 
     if knowledge_source == "cloud":

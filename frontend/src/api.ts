@@ -14,6 +14,7 @@ import type {
   TestResult,
   ToolItem,
   ToolPreset,
+  VLMConfig,
   WebSourceBundle,
 } from './types'
 
@@ -157,6 +158,102 @@ export async function updateLLMConfig(
 export async function deleteLLMConfig(id: number): Promise<void> {
   const response = await adminFetch(`/admin/config/llm/${id}`, { method: 'DELETE' })
   if (!response.ok) throw new Error('Unable to delete LLM config')
+}
+
+// ---- VLM (图片识别多模态模型) Management ----
+
+export async function listVLMConfigs(): Promise<VLMConfig[]> {
+  const response = await adminFetch('/admin/config/vlm')
+  if (!response.ok) throw new Error('Unable to load VLM configs')
+  return response.json()
+}
+
+export async function createVLMConfig(payload: {
+  provider: string
+  model_name: string
+  api_key?: string
+  base_url?: string
+  is_active?: boolean
+}): Promise<VLMConfig> {
+  const response = await adminFetch('/admin/config/vlm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error('Unable to create VLM config')
+  return response.json()
+}
+
+export async function updateVLMConfig(
+  id: number,
+  payload: Partial<{
+    provider: string
+    model_name: string
+    api_key: string
+    base_url: string
+    is_active: boolean
+  }>,
+): Promise<VLMConfig> {
+  const response = await adminFetch(`/admin/config/vlm/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error('Unable to update VLM config')
+  return response.json()
+}
+
+export async function deleteVLMConfig(id: number): Promise<void> {
+  const response = await adminFetch(`/admin/config/vlm/${id}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error('Unable to delete VLM config')
+}
+
+export async function testVLMConfig(params: {
+  provider: string
+  model_name: string
+  api_key: string
+  base_url: string
+}): Promise<TestResult> {
+  const response = await adminFetch('/admin/config/vlm/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!response.ok) throw new Error('VLM test failed')
+  return response.json()
+}
+
+// ---- 图片上传(供 identify_landmark 工具使用) ----
+
+export async function uploadImage(file: File): Promise<{ image_ref: string; size_bytes: number; mime: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  const uploadUrl = resolveApiUrl('/upload/image')
+  let response: Response
+  try {
+    response = await fetch(uploadUrl, {
+      method: 'POST',
+      body: form,
+    })
+  } catch {
+    throw new Error(
+      '图片上传请求没有到达后端。请检查后端服务是否运行、前端 API 地址是否正确，以及 Nginx/HTTPS 代理是否允许上传图片。',
+    )
+  }
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const data = await response.json()
+      detail = data?.detail || ''
+    } catch {
+      /* ignore */
+    }
+    if (response.status === 413) {
+      throw new Error('图片超过服务器代理允许的大小，请更新 Nginx client_max_body_size 或换一张更小的图片')
+    }
+    throw new Error(detail || `图片上传失败 (${response.status})`)
+  }
+  return response.json()
 }
 
 // ---- Embedding Config Management ----
@@ -405,7 +502,7 @@ type ChatStreamCallbacks = {
 }
 
 export async function streamChat(
-  messages: Pick<ChatMessage, 'role' | 'content'>[],
+  messages: Pick<ChatMessage, 'role' | 'content' | 'image_ref' | 'image_refs'>[],
   callbacksOrOnDelta:
     | ((content: string) => void)
     | ChatStreamCallbacks,

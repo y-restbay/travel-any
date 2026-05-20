@@ -16,6 +16,7 @@ import {
   Globe,
   GripVertical,
   History,
+  ImageIcon,
   Loader2,
   Mic,
   MicOff,
@@ -41,7 +42,7 @@ import {
   saveConversation,
   setActiveId,
 } from '../lib/conversationStore'
-import { API_BASE, getAdminConfig, resumeChat, streamChat } from '../api'
+import { API_BASE, getAdminConfig, resumeChat, streamChat, uploadImage } from '../api'
 import { createId } from '../lib/uuid'
 import type { AgentRuntime, ChatMessage, ExportInfo, Itinerary, MapPayload, PendingInterrupt, ThinkingStep, ThinkingTrace, ThinkingTraceStep, WebSourceBundle } from '../types'
 
@@ -55,6 +56,17 @@ const intro: ChatMessage = {
   content:
     '你好，我是 **WanderBot 漫游指南**。告诉我目的地、天数、预算、同行人群和喜欢的节奏，我会帮你把旅行计划整理成清晰、舒服、可执行的版本。',
 }
+
+type PendingImageItem = {
+  id: string
+  ref: string
+  preview: string
+  name: string
+  status: 'uploading' | 'ready' | 'error'
+  error?: string
+}
+
+const MAX_IMAGES = 5
 
 const suggestions = [
   '西安兵马俑 + 华清宫 2 天游，帮我用地图把景点、交通和顺路餐馆串起来',
@@ -116,6 +128,14 @@ export default function App() {
   const [deepThinking, setDeepThinking] = useState(false)
   const [knowledgeSource, setKnowledgeSource] = useState<'local' | 'cloud'>('local')
   const [webSearch, setWebSearch] = useState(false)
+  // 看图识景点:多图上传管理
+  const [pendingImages, setPendingImages] = useState<PendingImageItem[]>([])
+  const pendingImagesRef = useRef(pendingImages)
+  pendingImagesRef.current = pendingImages
+  const [imageError, setImageError] = useState('')
+  const imageInputRef = useRef<HTMLInputElement | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
+  const dragCounterRef = useRef(0)
   const [isVoiceListening, setIsVoiceListening] = useState(false)
   const [voiceSupported, setVoiceSupported] = useState(true)
   const resizeRef = useRef({ startX: 0, startWidth: DEFAULT_MAP_WIDTH })
@@ -320,8 +340,14 @@ export default function App() {
   }
 
   async function submit(value = input) {
-    const content = value.trim()
-    if (!content || isStreaming) return
+    // 没文本但带了图片时,默认填一个景点识别请求,避免后端 content 长度校验失败。
+    const readyImages = pendingImages.filter((p) => p.status === 'ready')
+    const hasImages = readyImages.length > 0
+    let content = value.trim()
+    if (!content && hasImages) {
+      content = '请帮我识别这些图片中的景点。'
+    }
+    if ((!content || isStreaming) && !hasImages) return
 
     // 首条用户消息时才落地会话 id(避免空会话刷屏);后续沿用同一 id。
     if (!conversationIdRef.current) {
@@ -330,7 +356,21 @@ export default function App() {
       setActiveConvId(id)
     }
 
-    const userMessage: ChatMessage = { id: createId(), role: 'user', content }
+    // 多图:全部 image_ref 放入 image_refs;单图:兼容旧字段 image_ref
+    const refs = readyImages.map((p) => p.ref)
+    const previews = readyImages.map((p) => p.preview)
+    const userMessage: ChatMessage = {
+      id: createId(),
+      role: 'user',
+      content,
+      ...(refs.length > 0
+        ? { image_refs: refs, image_previews: previews }
+        : {}),
+      // 单图兼容
+      ...(refs.length === 1
+        ? { image_ref: refs[0], image_preview: previews[0] }
+        : {}),
+    }
     const assistantId = createId()
     const assistantMessage: ChatMessage = {
       id: assistantId,
@@ -346,6 +386,7 @@ export default function App() {
 
     setMessages(nextMessages)
     setInput('')
+    clearAllPendingImages()
     setIsStreaming(true)
     setStreamingMessageId(assistantId)
 
@@ -354,7 +395,12 @@ export default function App() {
         nextMessages
           .filter((message) => message.id !== 'intro')
           .filter((message) => message.content.trim().length > 0)
-          .map(({ role, content }) => ({ role, content })),
+          .map(({ role, content, image_ref, image_refs }) => ({
+            role,
+            content,
+            ...(image_ref ? { image_ref } : {}),
+            ...(image_refs && image_refs.length > 0 ? { image_refs } : {}),
+          })),
         buildStreamCallbacks(assistantId, setMessages, conversationIdRef, setLatestMapPayloads),
         undefined,
         undefined,
@@ -386,6 +432,175 @@ export default function App() {
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
     void submit()
+  }
+
+  async function handlePickImage(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    if (files.length === 0) return
+
+    const existingReady = pendingImagesRef.current.filter((p) => p.status === 'ready').length
+    const totalAfterAdd = existingReady + files.length
+    if (totalAfterAdd > MAX_IMAGES) {
+      setImageError(`最多上传 ${MAX_IMAGES} 张图片，已有 ${existingReady} 张`)
+      return
+    }
+
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) {
+        setImageError(`"${file.name}" 不是图片文件，已跳过`)
+        continue
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setImageError(`"${file.name}" 太大 (${(file.size / (1024 * 1024)).toFixed(1)}MB)，上限 10MB，已跳过`)
+        continue
+      }
+
+      const itemId = createId()
+      const preview = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.onerror = () => reject(new Error('读取本地图片失败'))
+        reader.readAsDataURL(file)
+      })
+
+      // 先加预览占位，再上传
+      const placeholder: PendingImageItem = { id: itemId, ref: '', preview, name: file.name, status: 'uploading' }
+      setPendingImages((prev) => [...prev, placeholder])
+
+      // 上传
+      try {
+        const { image_ref } = await uploadImage(file)
+        setPendingImages((prev) =>
+          prev.map((p) => (p.id === itemId ? { ...p, ref: image_ref, status: 'ready' } : p)),
+        )
+      } catch (err) {
+        setPendingImages((prev) =>
+          prev.map((p) =>
+            p.id === itemId
+              ? { ...p, status: 'error', error: err instanceof Error ? err.message : '上传失败' }
+              : p,
+          ),
+        )
+      }
+    }
+  }
+
+  function removePendingImage(id: string) {
+    setPendingImages((prev) => prev.filter((p) => p.id !== id))
+    setImageError('')
+  }
+
+  function retryUpload(item: PendingImageItem) {
+    // 重新触发上传入口：快速方法是在 items 里把 status 重置为 uploading，但实际重试需要 file
+    // 这里简化处理：删除该项，用户重新选图
+    removePendingImage(item.id)
+  }
+
+  function clearAllPendingImages() {
+    setPendingImages([])
+    setImageError('')
+    if (imageInputRef.current) imageInputRef.current.value = ''
+  }
+
+  // ---- 拖拽上传 ----
+  function handleDragEnter(event: React.DragEvent) {
+    event.preventDefault()
+    event.stopPropagation()
+    dragCounterRef.current += 1
+    // 只检查是否有文件类型，不阻止非文件拖入
+    setIsDragging(true)
+  }
+
+  function handleDragOver(event: React.DragEvent) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  function handleDragLeave(event: React.DragEvent) {
+    event.preventDefault()
+    event.stopPropagation()
+    dragCounterRef.current -= 1
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0
+      setIsDragging(false)
+    }
+  }
+
+  async function handleDrop(event: React.DragEvent) {
+    event.preventDefault()
+    event.stopPropagation()
+    setIsDragging(false)
+    dragCounterRef.current = 0
+
+    const files = Array.from(event.dataTransfer.files).filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) {
+      setImageError('仅支持图片文件，已忽略非图片文件')
+      return
+    }
+    await processImageFiles(files)
+  }
+
+  // ---- 粘贴上传 ----
+  useEffect(() => {
+    function handlePaste(event: ClipboardEvent) {
+      if (isStreaming || !event.clipboardData) return
+      const items = Array.from(event.clipboardData.items)
+      const imageFiles = items
+        .filter((item) => item.type.startsWith('image/'))
+        .map((item) => item.getAsFile())
+        .filter((f): f is File => f !== null)
+      if (imageFiles.length === 0) return
+      event.preventDefault()
+      void processImageFiles(imageFiles)
+    }
+    window.addEventListener('paste', handlePaste)
+    return () => window.removeEventListener('paste', handlePaste)
+  }, [isStreaming])
+
+  // ---- 通用图片文件处理 ----
+  async function processImageFiles(files: File[]) {
+    // 从 ref 读取最新 pendingImages，避免闭包过期
+    const currentImages = pendingImagesRef.current
+    const existingReady = currentImages.filter((p) => p.status === 'ready').length
+    const totalAfterAdd = existingReady + files.length
+    if (totalAfterAdd > MAX_IMAGES) {
+      setImageError(`最多上传 ${MAX_IMAGES} 张图片，已有 ${existingReady} 张`)
+      return
+    }
+
+    for (const file of files) {
+      if (file.size > 10 * 1024 * 1024) {
+        setImageError(`"${file.name}" 太大 (${(file.size / (1024 * 1024)).toFixed(1)}MB)，上限 10MB，已跳过`)
+        continue
+      }
+
+      const itemId = createId()
+      const preview = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.onerror = () => reject(new Error('读取本地图片失败'))
+        reader.readAsDataURL(file)
+      })
+
+      const placeholder: PendingImageItem = { id: itemId, ref: '', preview, name: file.name, status: 'uploading' }
+      setPendingImages((prev) => [...prev, placeholder])
+
+      try {
+        const { image_ref } = await uploadImage(file)
+        setPendingImages((prev) =>
+          prev.map((p) => (p.id === itemId ? { ...p, ref: image_ref, status: 'ready' } : p)),
+        )
+      } catch (err) {
+        setPendingImages((prev) =>
+          prev.map((p) =>
+            p.id === itemId
+              ? { ...p, status: 'error', error: err instanceof Error ? err.message : '上传失败' }
+              : p,
+          ),
+        )
+      }
+    }
   }
 
   function toggleVoiceInput() {
@@ -503,7 +718,81 @@ export default function App() {
                   ))}
                 </div>
               )}
-              <div className="rounded-[2rem] bg-paper/95 p-2.5 shadow-soft backdrop-blur-xl transition focus-within:shadow-focus">
+              <div
+                  className="relative rounded-[2rem] bg-paper/95 p-2.5 shadow-soft backdrop-blur-xl transition focus-within:shadow-focus"
+                  onDragEnter={handleDragEnter}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                {/* 拖拽遮罩 */}
+                {isDragging && (
+                  <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-[2rem] border-2 border-dashed border-moss bg-sage/30 backdrop-blur-sm">
+                    <div className="flex flex-col items-center gap-2 text-moss">
+                      <ImageIcon size={32} />
+                      <span className="text-sm font-medium">拖放图片到这里</span>
+                    </div>
+                  </div>
+                )}
+                {/* 图片缩略图队列 */}
+                {(pendingImages.length > 0 || imageError) && (
+                  <div className="mx-1 mb-2 flex flex-wrap items-center gap-2">
+                    {pendingImages.map((item) => (
+                      <div key={item.id} className="group relative shrink-0">
+                        <img
+                          src={item.preview}
+                          alt={item.name}
+                          className={`h-14 w-14 rounded-2xl object-cover ${
+                            item.status === 'error'
+                              ? 'ring-2 ring-red-400 opacity-60'
+                              : item.status === 'uploading'
+                                ? 'opacity-70'
+                                : ''
+                          }`}
+                        />
+                        {item.status === 'uploading' && (
+                          <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-black/30">
+                            <Loader2 className="animate-spin text-paper" size={16} />
+                          </div>
+                        )}
+                        {item.status === 'error' && (
+                          <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-black/20">
+                            <X size={16} className="text-red-500" />
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removePendingImage(item.id)}
+                          className="absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full bg-paper text-muted opacity-0 shadow transition group-hover:opacity-100 hover:text-ink"
+                          title="移除图片"
+                          aria-label="移除图片"
+                        >
+                          <X size={11} />
+                        </button>
+                      </div>
+                    ))}
+                    {imageError && (
+                      <span className="max-w-[200px] truncate text-[11px] text-red-600">{imageError}</span>
+                    )}
+                    {pendingImages.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={clearAllPendingImages}
+                        className="shrink-0 rounded-2xl border border-line px-2.5 py-1 text-[11px] text-muted transition hover:bg-clay/30 hover:text-ink"
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
+                )}
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={handlePickImage}
+                />
                 <textarea
                   ref={textareaRef}
                   value={input}
@@ -535,6 +824,32 @@ export default function App() {
                 />
                 <div className="flex items-center justify-between gap-3 px-1 pb-0.5 pt-1">
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => imageInputRef.current?.click()}
+                      disabled={pendingImages.some((p) => p.status === 'uploading') || isStreaming}
+                      className={[
+                        'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-3xl border px-3 text-[12px] font-medium transition',
+                        pendingImages.some((p) => p.status === 'uploading') || isStreaming
+                          ? 'cursor-not-allowed border-line bg-paper/50 text-muted/40'
+                          : pendingImages.length > 0
+                            ? 'border-clayDeep/35 bg-sage/45 text-moss shadow-quiet'
+                            : 'border-line bg-paper/70 text-muted hover:border-clayDeep/30 hover:text-ink',
+                      ].join(' ')}
+                      aria-pressed={pendingImages.length > 0}
+                      title={
+                        pendingImages.length > 0
+                          ? `已附带 ${pendingImages.length} 张图片，点击可继续选择`
+                          : '上传图片（支持多选、拖拽、粘贴），让我识别其中的景点'
+                      }
+                    >
+                      {pendingImages.some((p) => p.status === 'uploading') ? (
+                        <Loader2 className="animate-spin" size={15} />
+                      ) : (
+                        <ImageIcon size={15} className={pendingImages.length > 0 ? 'text-moss' : ''} />
+                      )}
+                      <span>{pendingImages.length > 0 ? `已附图(${pendingImages.length})` : '识景点'}</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => setDeepThinking((prev) => !prev)}
@@ -643,7 +958,7 @@ export default function App() {
                   </div>
                   <button
                     type="submit"
-                    disabled={!input.trim() || isStreaming}
+                    disabled={(!input.trim() && pendingImages.filter((p) => p.status === 'ready').length === 0) || isStreaming}
                     className="grid h-11 w-11 shrink-0 place-items-center rounded-3xl bg-ink text-paper shadow-quiet transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:bg-muted/40"
                     aria-label="发送"
                   >
@@ -784,7 +1099,37 @@ function MessageBubble({
             <WebSearchTrace bundle={message.webSources} />
           )}
         {isUser ? (
-          <p className="whitespace-pre-wrap leading-7">{message.content}</p>
+          <div>
+            {/* 多图网格展示 */}
+            {message.image_previews && message.image_previews.length > 1 && (
+              <div className="mb-2 grid grid-cols-3 gap-2">
+                {message.image_previews.map((preview, idx) => (
+                  <a
+                    key={idx}
+                    href={preview}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    <img
+                      src={preview}
+                      alt={`用户上传图片 ${idx + 1}`}
+                      className="h-24 w-full rounded-2xl object-cover shadow-quiet transition hover:opacity-80"
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
+            {/* 单图展示 */}
+            {message.image_preview && !(message.image_previews && message.image_previews.length > 1) && (
+              <img
+                src={message.image_preview}
+                alt="用户上传的图片"
+                className="mb-2 max-h-56 w-auto rounded-3xl object-cover shadow-quiet"
+              />
+            )}
+            <p className="whitespace-pre-wrap leading-7">{message.content}</p>
+          </div>
         ) : (
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}

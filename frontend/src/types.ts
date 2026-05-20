@@ -4,6 +4,15 @@ export type ChatMessage = {
   id: string
   role: Role
   content: string
+  // 用户上传图片后由后端 /api/upload/image 返回的引用 ID,
+  // 提交聊天时携带,由后端 identify_landmark 工具用它取图
+  image_ref?: string
+  // 多图：一次上传多张图片的引用 ID 列表
+  image_refs?: string[]
+  // 仅用于本地 UI 预览(data URL),不会发送给后端
+  image_preview?: string
+  // 多图预览
+  image_previews?: string[]
   thinkingTrace?: ThinkingTrace
   thinkingSteps?: ThinkingStep[]  // 深度思考模式
   itinerary?: Itinerary
@@ -81,6 +90,17 @@ export type LLMConfig = {
 }
 
 export type EmbeddingConfig = {
+  id: number
+  provider: string
+  model_name: string
+  api_key: string
+  base_url: string
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type VLMConfig = {
   id: number
   provider: string
   model_name: string

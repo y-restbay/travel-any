@@ -346,6 +346,45 @@ def _rag_meta(
     return meta
 
 
+def _user_content_with_image_ref(message: ChatMessage) -> str:
+    """如果用户消息带 image_ref,在文本末尾附一行系统注,让调度 LLM 知道有图。
+
+    DeepSeek 等文本模型看不到图,只能通过 image_ref 调度 identify_landmark
+    工具间接"看"。这里用一段醒目的标记包裹,既不污染原文,又方便模型抓取。
+
+    支持单图 (image_ref) 和多图 (image_refs) 两种格式。
+    """
+    ref = getattr(message, "image_ref", None)
+    refs = getattr(message, "image_refs", None)
+    if not ref and not refs:
+        return message.content
+
+    if ref:
+        return (
+            f"{message.content}\n\n"
+            f"[图片 image_ref={ref}]\n"
+            "(系统提示:用户在本条消息中上传了一张图片。"
+            "你必须先调用 identify_landmark 工具,并把上述 image_ref 原样传给它;"
+            "拿到识别结果后再决定是否调用 search_realtime_travel_info / get_weather "
+            "等工具补充景点介绍、天气、周边信息。)"
+        )
+
+    ref_list = [r.strip() for r in refs if r and r.strip()]
+    if not ref_list:
+        return message.content
+    refs_str = ",".join(ref_list)
+    count = len(ref_list)
+    return (
+        f"{message.content}\n\n"
+        f"[图片 image_refs={refs_str}]\n"
+        f"(系统提示:用户在本条消息中上传了 {count} 张图片,image_refs={refs_str}。"
+        "你必须针对每个 image_ref 分别调用一次 identify_landmark 工具;"
+        "全部识别完成后,再根据用户的真实需求决定是否调用"
+        "search_realtime_travel_info / get_weather / get_directions "
+        "等工具补充介绍、天气、周边和路线信息。)"
+    )
+
+
 def _to_langchain_messages(
     messages: list[ChatMessage],
     system_prompt: SystemPrompt,
@@ -364,7 +403,7 @@ def _to_langchain_messages(
         if message.role == "system":
             langchain_messages.append(SystemMessage(content=message.content))
         elif message.role == "user":
-            langchain_messages.append(HumanMessage(content=message.content))
+            langchain_messages.append(HumanMessage(content=_user_content_with_image_ref(message)))
         elif message.role == "assistant":
             langchain_messages.append(AIMessage(content=message.content))
     return langchain_messages
@@ -772,6 +811,61 @@ def _qweather_weather_tool(tool_config: dict) -> Any:
     return get_weather
 
 
+def _landmark_identify_tool(tool_config: dict) -> Any:
+    """构建图片识别景点工具。
+
+    每次工具调用都从 vlm_configs 表里取活跃 VLM 配置;
+    若 vlm_configs 没有有效记录或 api_key 为空,回退到环境变量 DASHSCOPE_API_KEY。
+    """
+    from app.travel_tools.landmark_tool import (
+        LANDMARK_TOOL_DESCRIPTION,
+        handle_identify_landmark,
+    )
+    from app.travel_tools.vlm_client import VLMClient, build_vlm_client_from_config
+
+    def _resolve_vlm_client() -> VLMClient:
+        # 工具配置里的 model_name / base_url / api_key 优先;否则查 vlm_configs。
+        try:
+            from app.db.session import SessionLocal
+            from app.services.config_service import get_active_vlm_config
+
+            with SessionLocal() as db:
+                vlm_record = get_active_vlm_config(db)
+                if vlm_record is not None:
+                    return build_vlm_client_from_config(vlm_record)
+        except Exception:
+            pass
+
+        # tool_config 兜底:支持在工具配置面板里覆盖
+        return VLMClient(
+            api_key=tool_config.get("api_key") or "",
+            base_url=tool_config.get("base_url") or "",
+            model=tool_config.get("model") or "",
+        )
+
+    async def identify_landmark(
+        image_ref: str,
+        user_question: Optional[str] = None,
+    ) -> str:
+        client = _resolve_vlm_client()
+        result = await handle_identify_landmark(
+            {"image_ref": image_ref, "user_question": user_question or ""},
+            vlm_client=client,
+        )
+        return json.dumps(result, ensure_ascii=False)
+
+    identify_landmark.__doc__ = LANDMARK_TOOL_DESCRIPTION + (
+        "\n\n参数:\n"
+        "- image_ref(必填):用户上传图片的引用 ID,形如 img_xxxxx。"
+        "你在用户的最近一条消息里会看到 [图片 image_ref=img_xxx] 这样的提示,"
+        "把里面的 ID 原样填到这里即可。\n"
+        "- user_question(可选):用户随图片附加的文字问题,有助于辅助识别。\n\n"
+        "返回 JSON 字符串。当 状态=success 时,使用 景点名称 / 所在城市 继续编排其他工具;"
+        "当 状态=uncertain 时,不要编造景点名,按工具返回的'建议'文本与用户互动。"
+    )
+    return langchain_tool(identify_landmark)
+
+
 def _tavily_realtime_search_tool(
     tool_config: dict,
     *,
@@ -812,6 +906,7 @@ TOOL_FACTORIES = {
     "amap_directions": _amap_directions_tool,
     "itinerary_summary": _itinerary_summary_tool,
     "itinerary_export": _itinerary_export_tool,
+    "landmark_identify": _landmark_identify_tool,
 }
 
 # directions 工具需要把 map_payload 推到 SSE 流，工厂签名要多接一个 map_sink。

@@ -143,6 +143,54 @@ class LLMConfigRead(LLMConfigBase):
         return mask_secret(v)
 
 
+class VLMConfigBase(BaseModel):
+    """图片识别（多模态）模型配置 schema。"""
+
+    provider: str = "dashscope"
+    model_name: str = "qwen-vl-max"
+    api_key: str = ""
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    is_active: bool = True
+
+
+class VLMConfigCreate(VLMConfigBase):
+    pass
+
+
+class VLMConfigUpdate(BaseModel):
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class VLMConfigRead(VLMConfigBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def mask_api_key(cls, v: Any) -> Any:
+        return mask_secret(v)
+
+
+class TestVLMRequest(BaseModel):
+    provider: str = "dashscope"
+    model_name: str = "qwen-vl-max"
+    api_key: str = ""
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+class TestVLMResponse(BaseModel):
+    success: bool
+    latency_ms: int = 0
+    message: str = ""
+
+
 class EmbeddingConfigBase(BaseModel):
     provider: str = "hash"
     model_name: str = "hash-384"
