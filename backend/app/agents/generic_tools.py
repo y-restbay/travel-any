@@ -148,11 +148,15 @@ def generate_itinerary_summary(
 
 @tool
 def export_itinerary(
-    itinerary_id: str,
+    itinerary_id: str = "",
     format: str = "pdf",
     include_map_snapshot: bool = True,
 ) -> str:
-    """把已生成的行程导出为 PDF / Word,下载链接通过前端推送。"""
+    """把已生成的行程导出为 PDF / Word,下载链接通过前端推送。
+
+    itinerary_id 可留空；系统会自动导出最近生成的行程。用户说“总结一下并生成 PDF”
+    时,不要停下来追问,应在生成/复用行程卡片后立刻调用本工具。
+    """
     try:
         result, payload = handle_export_itinerary(
             {
@@ -309,11 +313,14 @@ def _build_generic_tools_with_sink(
 
     @tool
     def export_itinerary_with_sink(
-        itinerary_id: str,
+        itinerary_id: str = "",
         format: str = "pdf",
         include_map_snapshot: bool = True,
     ) -> str:
-        """把已生成的行程导出为 PDF / Word,下载链接通过前端推送。"""
+        """把已生成的行程导出为 PDF / Word,下载链接通过前端推送。
+
+        itinerary_id 可留空；系统会自动导出最近生成的行程。
+        """
         try:
             result, payload = handle_export_itinerary(
                 {

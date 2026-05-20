@@ -637,8 +637,9 @@ def _itinerary_summary_tool(
         - total_budget: {tickets, meals, transport, accommodation, total}
         - important_notes: 3-5 条最关键注意事项
 
-        调用后行程卡片会立即出现在前端,LLM 收到精简返回值后只需简短总结亮点
-        并询问用户是否需要导出 PDF / Word。
+        调用后行程卡片会立即出现在前端,LLM 收到精简返回值后只需简短总结亮点。
+        如果用户本轮同时要求“生成 PDF / Word / 导出 / 保存”,必须继续调用 export_itinerary,
+        不要停下来询问用户是否需要导出。
         """
         import json as _json
 
@@ -676,20 +677,22 @@ def _itinerary_export_tool(
 
     @langchain_tool
     def export_itinerary(
-        itinerary_id: str,
+        itinerary_id: str = "",
         format: str = "pdf",
         include_map_snapshot: bool = True,
     ) -> str:
         """把 generate_itinerary_summary 已生成的行程导出为 PDF 或 Word。
 
         参数:
-        - itinerary_id: 必填,由 generate_itinerary_summary 返回(itin_xxx)
+        - itinerary_id: 由 generate_itinerary_summary 返回(itin_xxx)。如果用户要求导出“当前/刚才/上面那份行程”
+          但你不知道 id,可以留空;系统会自动导出最近生成的行程
         - format: 'pdf' 或 'docx',默认 pdf;用户说 'Word' / '文档' 则用 docx
         - include_map_snapshot: 当前实现暂未启用,保留以便未来嵌入静态地图
 
-        前提:用户已经看到行程卡片并明确表达了导出意愿。
+        前提:用户已经看到行程卡片,或本轮刚调用 generate_itinerary_summary 生成了行程卡片。
         导出完成后下载链接会通过 SSE 推给前端,你只需简短确认。
-        若 itinerary_id 找不到,说明用户尚未生成行程,引导他先完成规划。
+        若用户一句话里说“帮我总结一下,并生成 PDF/Word”,应先生成/复用行程卡片,
+        再立刻调用本工具导出,不要要求用户再次说“生成 PDF”。
         """
         import json as _json
 

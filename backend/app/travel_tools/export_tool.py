@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.travel_tools.itinerary_store import get_itinerary
+from app.travel_tools.itinerary_store import get_itinerary, get_latest_itinerary
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ EXPORT_TOOL_SCHEMA: Dict[str, Any] = {
             "properties": {
                 "itinerary_id": {
                     "type": "string",
-                    "description": "由 generate_itinerary_summary 返回的 itin_xxx,必填。",
+                    "description": "由 generate_itinerary_summary 返回的 itin_xxx。若用户要求导出当前/上一份行程但你不知道 id,可留空。",
                 },
                 "format": {
                     "type": "string",
@@ -90,7 +90,7 @@ EXPORT_TOOL_SCHEMA: Dict[str, Any] = {
                     "default": True,
                 },
             },
-            "required": ["itinerary_id"],
+            "required": [],
         },
     },
 }
@@ -110,15 +110,25 @@ def handle_export_itinerary(
     fmt = (args.get("format") or "pdf").lower().strip()
     if fmt not in {"pdf", "docx"}:
         return {"error": f"format 必须是 pdf 或 docx,得到 '{fmt}'。"}, None
-    if not itinerary_id:
-        return {"error": "缺少 itinerary_id;请先调用 generate_itinerary_summary。"}, None
+    if itinerary_id:
+        itinerary = get_itinerary(itinerary_id)
+    else:
+        latest = get_latest_itinerary(session_id=session_id)
+        if latest is None:
+            itinerary = None
+        else:
+            itinerary_id, itinerary = latest
 
-    itinerary = get_itinerary(itinerary_id)
     if itinerary is None:
+        missing_detail = (
+            f"找不到 itinerary_id={itinerary_id};可能尚未生成行程,或服务已重启。"
+            if itinerary_id
+            else "当前会话还没有可导出的行程。"
+        )
         return (
             {
-                "error": f"找不到 itinerary_id={itinerary_id};可能尚未生成行程,或服务已重启。",
-                "提示": "请先调用 generate_itinerary_summary 生成行程,再导出。",
+                "error": missing_detail,
+                "提示": "如果用户已提供完整行程内容,请先调用 generate_itinerary_summary 生成/复用行程卡片,再立即调用 export_itinerary。",
             },
             None,
         )

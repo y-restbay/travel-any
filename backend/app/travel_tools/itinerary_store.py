@@ -14,7 +14,7 @@ session_id 在前端没有持久化时会变;itinerary_id 又是 uuid 前缀,
 from __future__ import annotations
 
 from threading import RLock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 _STORE: Dict[str, Dict[str, Any]] = {}
@@ -37,6 +37,27 @@ def get_itinerary(itinerary_id: str) -> Optional[Dict[str, Any]]:
         if not entry:
             return None
         return entry["data"]
+
+
+def get_latest_itinerary(*, session_id: Optional[str] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """读取最近生成的行程。
+
+    优先匹配当前 session_id；如果当前请求没有 session_id 或找不到匹配项，
+    回退到全局最近一条。这样用户说“总结一下，并生成 PDF”时，导出工具
+    不必依赖模型准确记住 itinerary_id。
+    """
+    with _LOCK:
+        if not _STORE:
+            return None
+
+        requested_session = (session_id or "").strip()
+        if requested_session:
+            for itinerary_id, entry in reversed(_STORE.items()):
+                if entry.get("session_id") == requested_session:
+                    return itinerary_id, entry["data"]
+
+        itinerary_id, entry = next(reversed(_STORE.items()))
+        return itinerary_id, entry["data"]
 
 
 def clear_all() -> None:
