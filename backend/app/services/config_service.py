@@ -218,6 +218,18 @@ def ensure_defaults(db: Session) -> None:
     # 让升级用户也能拿到新工具，但不会影响他们手工调过的现有工具配置。
     _ensure_tool_present(
         db,
+        name="get_weather",
+        label="Weather (QWeather)",
+        description=(
+            "查询任意城市的实时天气或未来 3/7 天天气预报，可选生活指数与逐小时数据。"
+            "用户询问某地天气、是否下雨、穿衣建议、出行天气、紫外线、台风预警等情况时使用。"
+            "默认从服务器环境变量 QWEATHER_KEY / QWEATHER_HOST / QWEATHER_GEO_HOST 读取配置。"
+        ),
+        tool_type="qweather_weather",
+        config={"api_key": "", "weather_host": "", "geo_host": ""},
+    )
+    _ensure_tool_present(
+        db,
         name="get_directions",
         label="Directions (Amap)",
         description=(

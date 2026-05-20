@@ -1240,7 +1240,9 @@ function buildStreamCallbacks(
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId
-            ? { ...message, thinkingTrace: updateThinkingTrace(message.thinkingTrace, meta) }
+            ? shouldHideRagTrace(message.thinkingTrace, meta)
+              ? message
+              : { ...message, thinkingTrace: updateThinkingTrace(message.thinkingTrace, meta) }
             : message,
         ),
       )
@@ -1595,6 +1597,10 @@ function updateThinkingTrace(existingTrace: ThinkingTrace | undefined, payload: 
   const trace = existingTrace ?? createPendingTrace()
   if (!isRecord(payload)) return trace
 
+  if (payload.rag_trace_visible === false) {
+    return trace
+  }
+
   if (isRecord(payload.tool_call)) {
     const toolCall = payload.tool_call
     const round = typeof toolCall.round === 'number' ? toolCall.round : 1
@@ -1725,6 +1731,12 @@ function updateThinkingTrace(existingTrace: ThinkingTrace | undefined, payload: 
       ...trace.steps.filter((step) => step.id.startsWith('tool-')),
     ],
   }
+}
+
+function shouldHideRagTrace(existingTrace: ThinkingTrace | undefined, payload: unknown): boolean {
+  if (!isRecord(payload)) return false
+  if (payload.rag_trace_visible !== false) return false
+  return !existingTrace
 }
 
 function upsertMapTraceStep(

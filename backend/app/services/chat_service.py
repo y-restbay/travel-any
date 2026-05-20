@@ -299,7 +299,12 @@ def _augmented_system_prompt(
     return f"{base}\n\n{STYLE_GUIDELINES}"
 
 
-def _rag_meta(retrieve_result: RetrieveResult, session_context: Optional[SessionContext] = None) -> dict:
+def _rag_meta(
+    retrieve_result: RetrieveResult,
+    session_context: Optional[SessionContext] = None,
+    *,
+    trace_visible: bool = True,
+) -> dict:
     injected_contexts = [
         {
             "chunk_id": context.chunk_id,
@@ -323,6 +328,7 @@ def _rag_meta(retrieve_result: RetrieveResult, session_context: Optional[Session
             if len(retrieve_result.context_block) > 900
             else retrieve_result.context_block
         ),
+        "rag_trace_visible": trace_visible,
         "rag_injected_contexts": injected_contexts,
         "rag_sources": [
             {
@@ -527,8 +533,8 @@ def _amap_directions_tool(tool_config: dict, *, map_sink: Optional[List[Dict[str
     ``map_sink`` 是单次请求维度的列表：每次工具被 LLM 调用并成功返回路线时，
     把 ``map_payload`` append 进去，调度循环负责把它通过 SSE 推送给前端。
     """
-    api_key = tool_config.get("api_key") or ""
-    host = tool_config.get("host") or ""
+    api_key = tool_config.get("api_key") or os.getenv("AMAP_KEY", "")
+    host = tool_config.get("host") or os.getenv("AMAP_HOST", "")
 
     @langchain_tool
     async def get_directions(
@@ -715,9 +721,9 @@ def _qweather_weather_tool(tool_config: dict) -> Any:
     - ``api_key`` 覆盖环境变量 ``QWEATHER_KEY``；
     - ``weather_host`` / ``geo_host`` 覆盖默认 ``devapi.qweather.com`` / ``geoapi.qweather.com``。
     """
-    api_key = tool_config.get("api_key") or ""
-    weather_host = tool_config.get("weather_host") or ""
-    geo_host = tool_config.get("geo_host") or ""
+    api_key = tool_config.get("api_key") or os.getenv("QWEATHER_KEY", "")
+    weather_host = tool_config.get("weather_host") or os.getenv("QWEATHER_HOST", "")
+    geo_host = tool_config.get("geo_host") or os.getenv("QWEATHER_GEO_HOST", "")
 
     @langchain_tool
     async def get_weather(
@@ -770,7 +776,7 @@ def _tavily_realtime_search_tool(
     session_id: str = "",
 ) -> Any:
     """构建 Tavily 实时旅游信息搜索工具。"""
-    api_key = tool_config.get("api_key") or ""
+    api_key = tool_config.get("api_key") or os.getenv("TAVILY_API_KEY", "")
 
     async def search_realtime_travel_info(
         query: str,
@@ -885,7 +891,7 @@ async def chat_stream_with_tools(
             "provider": llm_config.provider,
             "model": llm_config.model_name,
             "runtime": "langchain",
-            **_rag_meta(retrieve_result, session_context),
+            **_rag_meta(retrieve_result, session_context, trace_visible=False),
             "tools_bound": len(tools),
             "web_search": web_search,
         },
