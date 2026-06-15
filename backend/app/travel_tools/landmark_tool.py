@@ -189,7 +189,7 @@ async def handle_identify_landmark(
     reasoning = str(parsed.get("reasoning") or "").strip()
 
     # 防幻觉兜底:即使 VLM 给了名字,但置信度低或缺城市,降级为不确定。
-    is_confident = bool(landmark) and confidence in {"高", "中"}
+    is_confident = bool(landmark) and bool(city) and confidence in {"高", "中"}
 
     if is_confident:
         return {

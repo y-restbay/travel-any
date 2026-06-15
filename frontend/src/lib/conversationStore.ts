@@ -5,8 +5,9 @@
  * Phase B 接后端时,只需把本文件内部实现换成 fetch 调用,接口不变,上层零改动。
  *
  * 持久化字段刻意只保留可序列化且对「恢复对话」有意义的部分:
- *   id / role / content / itinerary / mapPayload(s) / exports / thinkingSteps / thinkingTrace
- * 丢弃 pendingInterrupt(重启后无法 resume,是坏数据)与地图(ref 渲染,不在本期)。
+ *   id / role / content / itinerary / exports / thinkingSteps / thinkingTrace / webSources
+ * 丢弃 pendingInterrupt(重启后无法 resume,是坏数据)与地图路线数据。
+ * 地图按钮依赖当前 SSE 返回的 mapPayload(s),历史恢复时不复活旧地图按钮,避免旧路线影响当前地图显示。
  *
  * localStorage ~5MB,行程卡 JSON 每条几 KB,这里做最近 50 条软上限 + 手动删除,
  * 个人本地原型足够;真要无限历史/跨设备请走 Phase B 后端方案。
@@ -28,7 +29,7 @@ export type ConversationMeta = {
 
 export type PersistedMessage = Pick<
   ChatMessage,
-  'id' | 'role' | 'content' | 'itinerary' | 'mapPayload' | 'mapPayloads' | 'exports' | 'thinkingSteps' | 'thinkingTrace' | 'webSources'
+  'id' | 'role' | 'content' | 'itinerary' | 'exports' | 'thinkingSteps' | 'thinkingTrace' | 'webSources'
 >
 
 function readJSON<T>(key: string, fallback: T): T {
@@ -66,8 +67,6 @@ function strip(messages: ChatMessage[]): PersistedMessage[] {
       role: m.role,
       content: m.content,
       itinerary: m.itinerary,
-      mapPayload: m.mapPayload,
-      mapPayloads: m.mapPayloads,
       exports: m.exports,
       thinkingSteps: m.thinkingSteps,
       thinkingTrace: m.thinkingTrace,
@@ -112,7 +111,11 @@ export function createConversation(): string {
 
 export function loadConversation(id: string): PersistedMessage[] | null {
   const raw = readJSON<PersistedMessage[] | null>(CONV_PREFIX + id, null)
-  return Array.isArray(raw) ? raw : null
+  if (!Array.isArray(raw)) return null
+  return raw.map((message) => {
+    const { mapPayload: _mapPayload, mapPayloads: _mapPayloads, ...rest } = message as PersistedMessage & Pick<ChatMessage, 'mapPayload' | 'mapPayloads'>
+    return rest
+  })
 }
 
 /**

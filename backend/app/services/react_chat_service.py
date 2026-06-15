@@ -7,7 +7,9 @@
 """
 
 import asyncio
+from datetime import date, timedelta
 import json
+import logging
 import re
 import time
 import uuid
@@ -46,6 +48,14 @@ from app.services.web_search_context import WEB_SEARCH_OFF_BLOCK, build_web_sear
 
 
 MAX_THINKING_STEPS = 6
+THINK_STREAM_IDLE_TIMEOUT_SECONDS = 18
+THINK_STREAM_TOTAL_TIMEOUT_SECONDS = 45
+THINK_STREAM_MAX_VISIBLE_CHARS = 1600
+ANSWER_STREAM_IDLE_TIMEOUT_SECONDS = 20
+ANSWER_STREAM_TOTAL_TIMEOUT_SECONDS = 60
+ANSWER_STREAM_MAX_VISIBLE_CHARS = 7000
+
+logger = logging.getLogger(__name__)
 
 
 # DeepSeek 等模型在「content + tool_calls 混合」时会把工具调用的控制 token
@@ -153,6 +163,15 @@ def _summarize_observation(tool_name: str, raw_result: str) -> str:
         return f"已联网搜索 {count} 条信息"
     if tool_name in {"web_search", "web_scrape"}:
         return "已完成网页检索"
+    if tool_name == "identify_landmark":
+        status = data.get("状态")
+        if status == "success":
+            name = data.get("景点名称") or ""
+            return f"已识别景点: {name}" if name else "已识别景点"
+        if status == "uncertain":
+            return "⚠️ 无法确定具体景点"
+        if status == "failed":
+            return "⚠️ 景点识别失败"
 
     return "已获取结果"
 
@@ -291,10 +310,25 @@ def _weather_summary_is_empty(value: Any) -> bool:
 
 _PENDING_TOOL_TEXT_RE = re.compile(
     r"(现在|接下来|下一步|然后|继续|准备|开始|马上|我将|我要|需要).{0,40}"
-    r"(调用|使用|执行|整合|生成|汇总).{0,40}"
+    r"(调用|使用|执行|整合|生成|汇总|补充|完善|重新生成).{0,40}"
     r"(工具|generate_itinerary_summary|get_directions|get_weather|search_realtime_travel_info|itinerary|summary)",
     re.IGNORECASE,
 )
+
+_CN_DIGIT_MAP = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
 
 
 def _looks_like_pending_tool_instruction(text: str) -> bool:
@@ -307,7 +341,210 @@ def _looks_like_pending_tool_instruction(text: str) -> bool:
         return False
     if _PENDING_TOOL_TEXT_RE.search(cleaned):
         return True
+    if re.search(r"(补充完整|还需要补充|需要补充|重新生成).{0,30}(行程|路线|卡片|PDF|pdf)", cleaned):
+        return True
     return bool(re.fullmatch(r".{0,30}(调用|使用).{0,30}(工具|tool).{0,30}", cleaned, re.I))
+
+
+def _force_tool_call_prompt(reason: str) -> str:
+    return (
+        "上一轮流式思考没有稳定地产出结构化工具调用，原因："
+        f"{reason}。\n"
+        "现在必须纠正：如果用户要求路线规划、酒店、美食、行程总结、PDF/Word 导出，"
+        "不要继续输出正文或长篇思考，必须使用可用工具完成动作。"
+        "通常顺序是：必要时调用 get_weather / get_directions，随后调用 "
+        "generate_itinerary_summary 生成完整行程卡片；若用户要求导出，再立即调用 "
+        "export_itinerary(format='pdf')。如果信息已经足够，直接调用对应工具。"
+        "只有工具动作都完成后，才能调用 signal_thinking_done。"
+    )
+
+
+def _latest_user_text(messages: List[ChatMessage]) -> str:
+    for message in reversed(messages):
+        if message.role == "user" and message.content.strip():
+            return message.content
+    return ""
+
+
+def _user_requested_export(messages: List[ChatMessage]) -> bool:
+    text = _latest_user_text(messages).lower()
+    return any(token in text for token in ("导出", "下载", "保存", "pdf", "word", "文档"))
+
+
+def _cn_number_to_int(text: str) -> Optional[int]:
+    value = (text or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    if value in _CN_DIGIT_MAP:
+        return _CN_DIGIT_MAP[value]
+    if "十" in value:
+        left, _, right = value.partition("十")
+        tens = _CN_DIGIT_MAP.get(left, 1) if left else 1
+        ones = _CN_DIGIT_MAP.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return None
+
+
+def _extract_expected_trip_days(messages: List[ChatMessage]) -> Optional[int]:
+    """从最近一条用户问题里提取明确的旅行天数,用于校验行程卡片完整性。"""
+    user_text = _latest_user_text(messages)
+    if not user_text:
+        return None
+
+    patterns = (
+        r"(?P<num>\d{1,2})\s*(?:天|日)\s*(?:游|旅行|行程|路线|安排|玩)?",
+        r"(?:玩|旅行|行程|路线|安排|规划)\s*(?P<num>\d{1,2})\s*(?:天|日)",
+        r"(?P<num>[一二两三四五六七八九十]{1,3})\s*(?:天|日)\s*(?:游|旅行|行程|路线|安排|玩)?",
+        r"(?:玩|旅行|行程|路线|安排|规划)\s*(?P<num>[一二两三四五六七八九十]{1,3})\s*(?:天|日)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, user_text)
+        if not match:
+            continue
+        days = _cn_number_to_int(match.group("num"))
+        if days and 1 <= days <= 30:
+            return days
+    return None
+
+
+def _extract_trip_start_date(messages: List[ChatMessage]) -> Optional[date]:
+    """解析最近用户问题里的出发日期,支持今天/明天/后天和 YYYY-MM-DD / M月D日。"""
+    user_text = _latest_user_text(messages)
+    if not user_text:
+        return None
+
+    today = date.today()
+    if "大后天" in user_text:
+        return today + timedelta(days=3)
+    if "后天" in user_text:
+        return today + timedelta(days=2)
+    if "明天" in user_text:
+        return today + timedelta(days=1)
+    if "今天" in user_text:
+        return today
+
+    match = re.search(r"(?P<year>20\d{2})[/-](?P<month>\d{1,2})[/-](?P<day>\d{1,2})", user_text)
+    if match:
+        try:
+            return date(int(match.group("year")), int(match.group("month")), int(match.group("day")))
+        except ValueError:
+            return None
+
+    match = re.search(r"(?P<month>\d{1,2})月(?P<day>\d{1,2})日", user_text)
+    if match:
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+        year = today.year
+        try:
+            parsed = date(year, month, day)
+        except ValueError:
+            return None
+        if parsed < today - timedelta(days=7):
+            try:
+                parsed = date(year + 1, month, day)
+            except ValueError:
+                return None
+        return parsed
+    return None
+
+
+def _trip_dates_label(start_date: Optional[date], days: Optional[int]) -> str:
+    if not start_date or not days or days < 1:
+        return ""
+    end_date = start_date + timedelta(days=days - 1)
+    return f"{start_date.isoformat()} 至 {end_date.isoformat()}"
+
+
+def _current_date_prompt_block() -> str:
+    today = date.today()
+    return (
+        "## 当前日期\n"
+        f"今天是 {today.isoformat()}（Asia/Shanghai）。"
+        "遇到“今天 / 明天 / 后天 / 大后天”等相对日期时，必须以这个日期为基准换算；"
+        "不要臆测到其他月份。"
+    )
+
+
+def _count_itinerary_days_from_args(args: Dict[str, Any]) -> int:
+    days = args.get("days")
+    if not isinstance(days, list):
+        return 0
+    count = 0
+    for day in days:
+        if not isinstance(day, dict):
+            continue
+        schedule = day.get("schedule")
+        if isinstance(schedule, list) and schedule:
+            count += 1
+    return count
+
+
+def _count_itinerary_days_from_result(result_text: str, args: Dict[str, Any]) -> int:
+    try:
+        parsed = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        raw_count = parsed.get("天数") or parsed.get("day_count")
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            return count
+    return _count_itinerary_days_from_args(args)
+
+
+def _is_successful_itinerary_result(result_text: str) -> bool:
+    try:
+        parsed = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("状态") == "success" and not parsed.get("error")
+
+
+def _remove_incomplete_itinerary_events(
+    event_sink: List[Tuple[str, Dict[str, Any]]],
+    expected_days: Optional[int],
+) -> None:
+    if not expected_days:
+        return
+    kept: List[Tuple[str, Dict[str, Any]]] = []
+    for evt_name, evt_payload in event_sink:
+        if evt_name == "itinerary_data":
+            days = evt_payload.get("days") if isinstance(evt_payload, dict) else None
+            if isinstance(days, list) and len(days) < expected_days:
+                continue
+        kept.append((evt_name, evt_payload))
+    event_sink[:] = kept
+
+
+def _incomplete_itinerary_error(expected_days: int, actual_days: int) -> str:
+    return json.dumps(
+        {
+            "error": (
+                f"行程卡片不完整: 用户明确要求 {expected_days} 天, "
+                f"但本次只生成了 {actual_days or 0} 天。"
+            ),
+            "修复要求": (
+                f"必须重新调用 generate_itinerary_summary, days 数组严格生成 {expected_days} 天; "
+                "每一天都要包含真实景点、酒店/住宿建议、美食/餐厅建议、交通动线和预算。"
+            ),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _itinerary_dates_mismatch_error(expected_dates: str, actual_dates: str) -> str:
+    return json.dumps(
+        {
+            "error": f"行程日期不一致: 用户时间应为 {expected_dates}, 但本次生成的是 {actual_dates or '空日期'}。",
+            "修复要求": f"必须重新调用 generate_itinerary_summary, trip_dates 严格填写 {expected_dates}。",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _itinerary_answer_context(args: Dict[str, Any], result_text: str) -> str:
@@ -413,9 +650,39 @@ def _tool_answer_context(tool_name: str, tc_args: Dict[str, Any], result_text: s
         return f"### 路线规划结果\n{summary}" if summary else ""
     if tool_name == "generate_itinerary_summary":
         return _itinerary_answer_context(tc_args, result_text)
+    if tool_name == "export_itinerary" and isinstance(parsed, dict):
+        fmt = parsed.get("文件格式") or parsed.get("format") or "PDF"
+        filename = parsed.get("文件名") or parsed.get("filename") or ""
+        link = parsed.get("下载链接") or parsed.get("download_url") or ""
+        return f"### 导出结果\n- 已导出: {fmt}\n- 文件: {filename}\n- 下载链接: {link}"
     if tool_name == "search_realtime_travel_info":
         summary = _summarize_observation(tool_name, result_text)
         return f"### 联网检索结果\n{summary}" if summary else ""
+    if tool_name == "identify_landmark" and isinstance(parsed, dict):
+        status = parsed.get("状态")
+        if status == "success":
+            name = parsed.get("景点名称") or ""
+            city = parsed.get("所在城市") or ""
+            return (
+                f"### 景点识别结果\n- 识别为: {name}（{city}）\n"
+                f"- 置信度: {parsed.get('置信度') or '中'}\n"
+                "- 最终回答可以直接称呼这个景点名,并补充介绍/天气/周边。"
+            )
+        if status == "uncertain":
+            features = parsed.get("图片特征") or ""
+            return (
+                '### 景点识别结果\n- 状态: 无法确定具体景点\n'
+                f'- 观察到的视觉特征: {features}\n'
+                '- 最终回答**严禁**说出具体景点名,不要写"这看起来是 XX"或"可能是 XX"等暗示。'
+                '必须如实告诉用户没能识别,并礼貌询问该景点大致位置以缩小范围。'
+            )
+        if status == "failed":
+            reason = parsed.get("错误") or "识别服务异常"
+            return (
+                f"### 景点识别结果\n- 状态: 识别失败 ({reason})\n"
+                "- 最终回答必须如实说明识别未成功,不得编造景点名;"
+                "建议请求用户重新上传或描述图片内容。"
+            )
     return ""
 
 
@@ -423,11 +690,16 @@ def _split_tool_calls_for_execution(tool_calls: List[Dict[str, Any]]) -> List[Di
     """同一轮工具可并发执行,但行程汇总必须最后跑。
 
     天气、搜索、路线等工具互相独立,可同时请求;generate_itinerary_summary
-    依赖前面天气/路线结果和兜底注入,放到批次尾部执行更稳。
+    依赖前面天气/路线结果和兜底注入;export_itinerary 又依赖已生成的行程。
     """
+    order = {
+        "generate_itinerary_summary": 1,
+        "export_itinerary": 2,
+        "signal_thinking_done": 3,
+    }
     return sorted(
         tool_calls,
-        key=lambda tc: 1 if (tc.get("name") or "") == "generate_itinerary_summary" else 0,
+        key=lambda tc: order.get(tc.get("name") or "", 0),
     )
 
 
@@ -451,7 +723,7 @@ def _build_lc_messages(
         + "\n\n只能调用上面列出的工具。若某个能力对应的工具不在列表里，不要臆造工具调用；"
         "请在思考中说明该能力当前不可用，并用已有信息继续完成回答。"
     )
-    augmented = f"{base}\n\n{tool_policy}\n\n{REACT_SYSTEM_PROMPT}"
+    augmented = f"{base}\n\n{_current_date_prompt_block()}\n\n{tool_policy}\n\n{REACT_SYSTEM_PROMPT}"
 
     lc_messages: List[BaseMessage] = [SystemMessage(content=augmented)]
     for m in messages:
@@ -539,6 +811,10 @@ async def chat_stream_with_react(
     # get_weather 真实返回累积,LLM 漏填 generate_itinerary_summary 时兜底注入卡片
     captured_weather: List[Dict[str, str]] = []
     answer_context_blocks: List[str] = []
+    expected_trip_days = _extract_expected_trip_days(messages)
+    expected_trip_start = _extract_trip_start_date(messages)
+    expected_trip_dates = _trip_dates_label(expected_trip_start, expected_trip_days)
+    has_complete_itinerary = False
 
     try:
         while step < MAX_THINKING_STEPS and not thinking_done:
@@ -554,19 +830,88 @@ async def chat_stream_with_react(
             gathered: Optional[BaseMessage] = None
             streamed_len = 0  # 本轮真流式吐出的(已过滤)思考字符数
             used_fallback = False
+            stream_interrupted_reason = ""
+            tool_call_args_announced = False  # 大工具参数流式期间前端会静默几十秒
             with llm_duration_timer(llm_config.model_name, "react_think"):
-                async for chunk in model.astream(lc_messages):
+                stream_iter = model.astream(lc_messages).__aiter__()
+                stream_started_at = time.time()
+                while True:
+                    if time.time() - stream_started_at > THINK_STREAM_TOTAL_TIMEOUT_SECONDS:
+                        stream_interrupted_reason = "思考阶段模型输出超过总时限"
+                        logger.warning(
+                            "ReAct think stream total timeout | step=%s | model=%s",
+                            step,
+                            llm_config.model_name,
+                        )
+                        break
+                    if streamed_len > THINK_STREAM_MAX_VISIBLE_CHARS:
+                        stream_interrupted_reason = "思考文本过长且尚未调用工具"
+                        logger.warning(
+                            "ReAct think stream visible text cap | step=%s | chars=%s | model=%s",
+                            step,
+                            streamed_len,
+                            llm_config.model_name,
+                        )
+                        break
+                    try:
+                        chunk = await asyncio.wait_for(
+                            stream_iter.__anext__(),
+                            timeout=THINK_STREAM_IDLE_TIMEOUT_SECONDS,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        stream_interrupted_reason = "思考阶段模型长时间没有新输出"
+                        logger.warning(
+                            "ReAct think stream idle timeout | step=%s | model=%s",
+                            step,
+                            llm_config.model_name,
+                        )
+                        break
                     gathered = chunk if gathered is None else gathered + chunk
+                    # 模型构造大工具参数(如 5 天行程的 generate_itinerary_summary)时,
+                    # token 全部流到 tool_call_chunks 而非 content,前端会看到 30s+ 静默。
+                    # 检测到 tool_call_chunks 首次出现就发一次状态,让用户知道在干活。
+                    if not tool_call_args_announced:
+                        tcc = getattr(chunk, "tool_call_chunks", None)
+                        if tcc:
+                            first_name = next(
+                                (c.get("name") for c in tcc if isinstance(c, dict) and c.get("name")),
+                                "",
+                            )
+                            if first_name:
+                                yield sse_event(
+                                    "status",
+                                    {"detail": f"正在准备调用工具：{first_name}..."},
+                                )
+                                tool_call_args_announced = True
                     raw = _message_content_to_text(getattr(chunk, "content", ""))
                     if raw:
                         safe = filt.feed(raw)
                         if safe:
-                            streamed_len += len(safe.strip())
-                            yield sse_event("thought", {"text": safe, "step": step})
+                            remaining = max(0, THINK_STREAM_MAX_VISIBLE_CHARS - streamed_len)
+                            if remaining <= 0:
+                                stream_interrupted_reason = "思考文本过长且尚未调用工具"
+                                break
+                            visible = safe[:remaining]
+                            streamed_len += len(visible.strip())
+                            yield sse_event("thought", {"text": visible, "step": step})
+                            if len(safe) > remaining or streamed_len >= THINK_STREAM_MAX_VISIBLE_CHARS:
+                                stream_interrupted_reason = "思考文本过长且尚未调用工具"
+                                logger.warning(
+                                    "ReAct think stream visible text cap | step=%s | chars=%s | model=%s",
+                                    step,
+                                    streamed_len,
+                                    llm_config.model_name,
+                                )
+                                break
                 tail = filt.flush()
-                if tail:
-                    streamed_len += len(tail.strip())
-                    yield sse_event("thought", {"text": tail, "step": step})
+                if tail and not stream_interrupted_reason:
+                    remaining = max(0, THINK_STREAM_MAX_VISIBLE_CHARS - streamed_len)
+                    if remaining > 0:
+                        visible = tail[:remaining]
+                        streamed_len += len(visible.strip())
+                        yield sse_event("thought", {"text": visible, "step": step})
 
             response = gathered
             tool_calls = list(getattr(response, "tool_calls", None) or []) if response else []
@@ -575,9 +920,32 @@ async def chat_stream_with_react(
             )
             if response is None or (not tool_calls and _TOOL_MARKUP_RE.search(raw_content)):
                 used_fallback = True
-                response = await model.ainvoke(lc_messages)
-                tool_calls = list(getattr(response, "tool_calls", None) or [])
-                raw_content = _message_content_to_text(getattr(response, "content", ""))
+                try:
+                    response = await asyncio.wait_for(
+                        model.ainvoke(lc_messages),
+                        timeout=THINK_STREAM_IDLE_TIMEOUT_SECONDS,
+                    )
+                    tool_calls = list(getattr(response, "tool_calls", None) or [])
+                    raw_content = _message_content_to_text(getattr(response, "content", ""))
+                except asyncio.TimeoutError:
+                    stream_interrupted_reason = stream_interrupted_reason or "非流式工具解析超时"
+                    logger.warning(
+                        "ReAct think fallback ainvoke timeout | step=%s | model=%s",
+                        step,
+                        llm_config.model_name,
+                    )
+
+            if stream_interrupted_reason and not tool_calls:
+                lc_messages.append(AIMessage(content=_strip_tool_markup(raw_content)[:1200]))
+                lc_messages.append(SystemMessage(content=_force_tool_call_prompt(stream_interrupted_reason)))
+                yield sse_event(
+                    "thought",
+                    {
+                        "text": "（思考输出过长，已停止继续展开，转为执行工具或收尾）",
+                        "step": step,
+                    },
+                )
+                continue
 
             usage = extract_usage_metadata(response)
             if usage:
@@ -618,6 +986,7 @@ async def chat_stream_with_react(
 
             ordered_tool_calls = _split_tool_calls_for_execution(tool_calls)
             tool_results: Dict[str, Tuple[str, Dict[str, Any], str]] = {}
+            step_incomplete_itinerary = False
 
             async def invoke_tool(tc: Dict[str, Any], tc_args: Dict[str, Any]) -> str:
                 tc_name = tc.get("name") or ""
@@ -643,7 +1012,13 @@ async def chat_stream_with_react(
                     and captured_weather
                     and _weather_summary_is_empty(tc_args.get("weather_summary"))
                 ):
-                    return {**tc_args, "weather_summary": captured_weather}
+                    tc_args = {**tc_args, "weather_summary": captured_weather}
+                if (
+                    tc_name == "generate_itinerary_summary"
+                    and expected_trip_dates
+                    and str(tc_args.get("trip_dates") or "").strip() != expected_trip_dates
+                ):
+                    tc_args = {**tc_args, "trip_dates": expected_trip_dates}
                 return tc_args
 
             async def flush_side_effects() -> AsyncIterator[str]:
@@ -656,6 +1031,7 @@ async def chat_stream_with_react(
             async def emit_tool_result(
                 tc: Dict[str, Any], tc_args: Dict[str, Any], result_text: str
             ) -> None:
+                nonlocal has_complete_itinerary, step_incomplete_itinerary
                 tc_name = tc.get("name") or ""
                 tc_id = tc.get("id") or ""
                 observation_detail = ""
@@ -669,6 +1045,31 @@ async def chat_stream_with_react(
                             seen.add(entry.get("date"))
                             captured_weather.append(entry)
                         observation_detail = _weather_detail_text(place, entries)
+
+                if tc_name == "generate_itinerary_summary":
+                    actual_days = _count_itinerary_days_from_result(result_text, tc_args)
+                    actual_trip_dates = str(tc_args.get("trip_dates") or "").strip()
+                    if (
+                        expected_trip_days
+                        and _is_successful_itinerary_result(result_text)
+                        and actual_days < expected_trip_days
+                    ):
+                        _remove_incomplete_itinerary_events(event_sink, expected_trip_days)
+                        result_text = _incomplete_itinerary_error(expected_trip_days, actual_days)
+                        step_incomplete_itinerary = True
+                    elif (
+                        expected_trip_dates
+                        and _is_successful_itinerary_result(result_text)
+                        and actual_trip_dates != expected_trip_dates
+                    ):
+                        _remove_incomplete_itinerary_events(event_sink, expected_trip_days)
+                        result_text = _itinerary_dates_mismatch_error(
+                            expected_trip_dates,
+                            actual_trip_dates,
+                        )
+                        step_incomplete_itinerary = True
+                    elif _is_successful_itinerary_result(result_text):
+                        has_complete_itinerary = True
 
                 answer_context = _tool_answer_context(tc_name, tc_args, result_text, observation_detail)
                 if answer_context:
@@ -709,7 +1110,7 @@ async def chat_stream_with_react(
                         },
                     )
                     thinking_done = True
-                elif tc_name == "generate_itinerary_summary":
+                elif tc_name in {"generate_itinerary_summary", "export_itinerary"}:
                     deferred_calls.append((tc, tc_args))
                 else:
                     runnable_calls.append((tc, tc_args))
@@ -735,7 +1136,7 @@ async def chat_stream_with_react(
                     async for event in flush_side_effects():
                         yield event
 
-            # 第二批:行程汇总依赖前面的天气/路线结果,必须最后执行。
+            # 第二批:行程汇总和导出依赖前面的天气/路线结果,必须最后执行。
             for tc, _tc_args in deferred_calls:
                 tc_args = prepare_args(tc)
                 result_text = await invoke_tool(tc, tc_args)
@@ -763,6 +1164,71 @@ async def chat_stream_with_react(
             async for event in flush_side_effects():
                 yield event
 
+            if step_incomplete_itinerary and expected_trip_days:
+                thinking_done = False
+                thinking_summary = ""
+                lc_messages.append(
+                    SystemMessage(
+                        content=(
+                            f"刚才的行程卡片不完整。用户明确要求 {expected_trip_days} 天完整路线规划，"
+                            f"你必须继续调用 generate_itinerary_summary，days 数组严格生成 {expected_trip_days} 天。"
+                            + (f"trip_dates 必须填写 {expected_trip_dates}。" if expected_trip_dates else "")
+                            +
+                            "每一天至少包含上午/中午/下午/晚上安排，补足酒店区域或酒店建议、美食/餐厅建议、"
+                            "景点顺序、交通动线、预算和注意事项。不要只输出文字说要补充，必须结构化调用工具。"
+                        )
+                    )
+                )
+                yield sse_event(
+                    "thought",
+                    {
+                        "text": f"（刚才的行程卡片不足 {expected_trip_days} 天，已要求重新生成完整版本）",
+                        "step": step,
+                    },
+                )
+                continue
+
+        if (
+            _user_requested_export(messages)
+            and has_complete_itinerary
+            and any("### 行程卡片数据" in block for block in answer_context_blocks)
+            and not any("### 导出结果" in block for block in answer_context_blocks)
+        ):
+            yield sse_event(
+                "action",
+                {
+                    "tool": "export_itinerary",
+                    "args": {"format": "pdf"},
+                    "tool_call_id": "auto_export_pdf",
+                    "step": step,
+                },
+            )
+            export_tool = tools_map.get("export_itinerary")
+            if export_tool is not None:
+                try:
+                    export_result = await export_tool.ainvoke({"format": "pdf"})
+                except Exception as exc:
+                    export_result = json.dumps(
+                        {"error": f"{exc.__class__.__name__}: {exc}"},
+                        ensure_ascii=False,
+                    )
+                export_text = str(export_result)
+                answer_context_blocks.append(
+                    _tool_answer_context("export_itinerary", {"format": "pdf"}, export_text, "")
+                    or f"### 导出结果\n{export_text[:500]}"
+                )
+                yield sse_event(
+                    "observation",
+                    {
+                        "tool": "export_itinerary",
+                        "summary": _summarize_observation("export_itinerary", export_text),
+                        "tool_call_id": "auto_export_pdf",
+                    },
+                )
+                while event_sink:
+                    evt_name, evt_payload = event_sink.pop(0)
+                    yield sse_event(evt_name, evt_payload)
+
         duration_ms = int((time.time() - start_ts) * 1000)
         if not thinking_done and step >= MAX_THINKING_STEPS and not thinking_summary:
             thinking_summary = f"已达思考步数上限 {MAX_THINKING_STEPS},基于已收集信息回答"
@@ -781,34 +1247,35 @@ async def chat_stream_with_react(
                 yield sse_event("answer_chunk", {"text": piece})
                 await asyncio.sleep(0.008)
         else:
-            # 最终回答只喂原始对话 + 压缩事实,不再喂完整 ReAct 工具历史。
-            # 这能显著减少上下文长度,也避免模型复述中间过程。
-            answer_base = _augmented_system_prompt(
-                system_prompt,
-                retrieve_result,
-                session_context,
-                web_search_block,
-            )
-            answer_messages: List[BaseMessage] = [SystemMessage(content=answer_base)]
-            for m in messages:
-                if m.role == "system":
-                    answer_messages.append(SystemMessage(content=m.content))
-                elif m.role == "user":
-                    answer_messages.append(HumanMessage(content=m.content))
-                elif m.role == "assistant":
-                    answer_messages.append(AIMessage(content=m.content))
-            if answer_context_blocks:
-                answer_messages.append(
-                    SystemMessage(
-                        content="## 已收集的结构化旅行事实\n"
-                        + "\n\n".join(answer_context_blocks[-12:])
-                    )
-                )
-            answer_messages.append(SystemMessage(content=ANSWER_STAGE_PROMPT))
-            answer_model = create_chat_model(llm_config)
+            # 复用 think 阶段的 lc_messages 和 model:让 prompt cache 命中长前缀,
+            # 同一份 tools 绑定也是 cache 命中的前提;ANSWER_STAGE_PROMPT 第 1 条
+            # 已禁止再调工具,无需重建无 tools 的 model。
+            lc_messages.append(SystemMessage(content=ANSWER_STAGE_PROMPT))
             parts: List[str] = []
+            current_len = 0
             with llm_duration_timer(llm_config.model_name, "react_answer"):
-                async for chunk in answer_model.astream(answer_messages):
+                answer_iter = model.astream(lc_messages).__aiter__()
+                answer_started_at = time.time()
+                while True:
+                    if time.time() - answer_started_at > ANSWER_STREAM_TOTAL_TIMEOUT_SECONDS:
+                        logger.warning(
+                            "ReAct answer stream total timeout | model=%s",
+                            llm_config.model_name,
+                        )
+                        break
+                    try:
+                        chunk = await asyncio.wait_for(
+                            answer_iter.__anext__(),
+                            timeout=ANSWER_STREAM_IDLE_TIMEOUT_SECONDS,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "ReAct answer stream idle timeout | model=%s",
+                            llm_config.model_name,
+                        )
+                        break
                     usage = extract_usage_metadata(chunk)
                     if usage:
                         last_usage = usage
@@ -816,8 +1283,19 @@ async def chat_stream_with_react(
                         _message_content_to_text(getattr(chunk, "content", "")), trim=False
                     )
                     if piece:
-                        parts.append(piece)
-                        yield sse_event("answer_chunk", {"text": piece})
+                        remaining = max(0, ANSWER_STREAM_MAX_VISIBLE_CHARS - current_len)
+                        if remaining <= 0:
+                            logger.warning(
+                                "ReAct answer stream visible text cap | model=%s",
+                                llm_config.model_name,
+                            )
+                            break
+                        visible = piece[:remaining]
+                        parts.append(visible)
+                        current_len += len(visible)
+                        yield sse_event("answer_chunk", {"text": visible})
+                        if len(piece) > remaining:
+                            break
             answer_text = "".join(parts).strip()
 
         if not answer_text:

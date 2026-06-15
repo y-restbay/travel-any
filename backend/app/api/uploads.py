@@ -23,7 +23,8 @@ _ALLOWED_MIMES = {
     "image/heic",
     "image/heif",
 }
-_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_MAX_MB = 50
+_MAX_BYTES = _MAX_MB * 1024 * 1024
 _EXTENSION_MIMES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -49,7 +50,7 @@ async def upload_image(file: UploadFile = File(...)) -> dict:
     """接收一张图片,缓存到进程内,返回 image_ref 供后续聊天消息携带。
 
     - 类型限制: JPEG/PNG/WebP/GIF/BMP/HEIC
-    - 大小限制: 10 MB
+    - 大小限制: 50 MB
     - TTL: 1 小时,过期自动清理
     """
     mime = _normalize_mime(file.content_type, file.filename)
@@ -68,7 +69,7 @@ async def upload_image(file: UploadFile = File(...)) -> dict:
     if len(data) > _MAX_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"图片过大: {len(data) // 1024} KB,超过 10 MB 限制",
+            detail=f"图片过大: {len(data) // 1024} KB,超过 {_MAX_MB} MB 限制",
         )
 
     ref = get_image_store().put(data, mime=mime)

@@ -67,6 +67,8 @@ type PendingImageItem = {
 }
 
 const MAX_IMAGES = 5
+const MAX_IMAGE_SIZE_MB = 50
+const MAX_IMAGE_SIZE_BYTES = MAX_IMAGE_SIZE_MB * 1024 * 1024
 
 const suggestions = [
   '西安兵马俑 + 华清宫 2 天游，帮我用地图把景点、交通和顺路餐馆串起来',
@@ -451,8 +453,10 @@ export default function App() {
         setImageError(`"${file.name}" 不是图片文件，已跳过`)
         continue
       }
-      if (file.size > 10 * 1024 * 1024) {
-        setImageError(`"${file.name}" 太大 (${(file.size / (1024 * 1024)).toFixed(1)}MB)，上限 10MB，已跳过`)
+      if (file.size > MAX_IMAGE_SIZE_BYTES) {
+        setImageError(
+          `"${file.name}" 太大 (${(file.size / (1024 * 1024)).toFixed(1)}MB)，上限 ${MAX_IMAGE_SIZE_MB}MB，已跳过`,
+        )
         continue
       }
 
@@ -570,8 +574,10 @@ export default function App() {
     }
 
     for (const file of files) {
-      if (file.size > 10 * 1024 * 1024) {
-        setImageError(`"${file.name}" 太大 (${(file.size / (1024 * 1024)).toFixed(1)}MB)，上限 10MB，已跳过`)
+      if (file.size > MAX_IMAGE_SIZE_BYTES) {
+        setImageError(
+          `"${file.name}" 太大 (${(file.size / (1024 * 1024)).toFixed(1)}MB)，上限 ${MAX_IMAGE_SIZE_MB}MB，已跳过`,
+        )
         continue
       }
 
