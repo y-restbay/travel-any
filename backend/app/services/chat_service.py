@@ -1042,8 +1042,11 @@ async def chat_stream_with_tools(
                         },
                     )
                     # 使用 ainvoke 同时兼容同步与异步 LangChain 工具
-                    result = await fn.ainvoke(tc["args"])
-                    result_text = str(result)
+                    try:
+                        result = await fn.ainvoke(tc["args"])
+                        result_text = str(result)
+                    except Exception as exc:
+                        result_text = json.dumps({"状态": "failed", "错误": f"工具执行异常: {exc}"}, ensure_ascii=False)
                     model_result_text = _tool_result_for_model(tc["name"], result_text)
                     yield sse_event(
                         "meta",
@@ -1058,6 +1061,11 @@ async def chat_stream_with_tools(
                         },
                     )
                     langchain_messages.append(ToolMessage(content=model_result_text, tool_call_id=tc["id"]))
+                else:
+                    # 模型调了一个不存在的工具,追加占位 ToolMessage 防止对话历史断裂
+                    langchain_messages.append(
+                        ToolMessage(content=json.dumps({"状态": "failed", "错误": f"未知工具: {tc['name']}"}, ensure_ascii=False), tool_call_id=tc["id"])
+                    )
             # 把这一轮工具产生的旁路事件全部推给前端
             async for event in _flush_tool_side_effects(map_sink, event_sink):
                 yield event
