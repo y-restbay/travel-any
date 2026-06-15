@@ -295,7 +295,7 @@ def ensure_defaults(db: Session) -> None:
         db.add(
             VLMConfig(
                 provider="dashscope",
-                model_name="qwen-vl-max",
+                model_name="qwen3.6-flash",
                 api_key="",
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 is_active=True,

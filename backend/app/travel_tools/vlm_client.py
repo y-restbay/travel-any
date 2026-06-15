@@ -17,7 +17,7 @@ from app.travel_tools.image_utils import to_data_url
 
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL = "qwen-vl-max"
+DEFAULT_MODEL = "qwen3.6-flash"
 DEFAULT_TIMEOUT = 60.0
 
 

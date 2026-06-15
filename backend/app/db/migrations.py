@@ -52,7 +52,7 @@ def run_lightweight_migrations(engine: Engine) -> None:
                     CREATE TABLE IF NOT EXISTS vlm_configs (
                         id INTEGER NOT NULL PRIMARY KEY,
                         provider VARCHAR(80) DEFAULT 'dashscope' NOT NULL,
-                        model_name VARCHAR(160) DEFAULT 'qwen-vl-max' NOT NULL,
+                        model_name VARCHAR(160) DEFAULT 'qwen3.6-flash' NOT NULL,
                         api_key TEXT DEFAULT '' NOT NULL,
                         base_url VARCHAR(500) DEFAULT 'https://dashscope.aliyuncs.com/compatible-mode/v1' NOT NULL,
                         is_active BOOLEAN DEFAULT 1 NOT NULL,
